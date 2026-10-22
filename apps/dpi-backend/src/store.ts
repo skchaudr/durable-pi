@@ -39,7 +39,7 @@ import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { curatedModels, defaultModelId } from "./model-catalog.js";
+import { curatedModels, defaultModelId, loadOperatorModels } from "./model-catalog.js";
 import { fauxModels, installFaux } from "./faux.js";
 import {
   Harness,
@@ -179,8 +179,23 @@ export class Store {
   private constructor(readonly options: StoreOptions) {
     if (options.provider === "faux") installFaux(this.models);
     else {
+      const extras = loadOperatorModels();
       const provider = openrouterProvider();
-      const catalog = provider.getModels();
+      const known = provider.getModels();
+      // pi-ai ships a snapshot of OpenRouter; synthesize entries for operator models it lacks.
+      const template = known.find((m) => m.id === "inception/mercury-2.5") ?? known[0];
+      const synthesized = extras
+        .filter((e) => !known.some((m) => m.id === e.id))
+        .map((e) => ({
+          ...template,
+          id: e.id,
+          name: e.name,
+          contextWindow: e.contextWindow ?? template.contextWindow,
+          maxTokens: e.maxTokens ?? template.maxTokens,
+          reasoning: e.reasoning ?? template.reasoning,
+          cost: { ...template.cost, input: e.cost?.input ?? 0, output: e.cost?.output ?? 0 },
+        }));
+      const catalog = [...known, ...synthesized];
       for (const model of curatedModels)
         if (!catalog.some((m) => m.id === model.id)) throw Error(`OpenRouter catalog missing ${model.id}`);
       this.models.setProvider({

@@ -1,7 +1,27 @@
 // Source: https://agenticengineer.com/model-stack, retrieved 2026-10-05.
 // Active S+, S, A and B models, matched to https://openrouter.ai/api/v1/models.
 // Gemini 4 Argon is rolling out and has no OpenRouter listing at this snapshot.
-export const curatedModels = [
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+export interface CuratedModel {
+  id: string;
+  name: string;
+  tier: string;
+  icon: string;
+}
+
+/** An operator-added model (see loadOperatorModels). The extra fields only matter when pi-ai's
+ *  OpenRouter snapshot lacks the id and the store has to synthesize a catalog entry for it. */
+export interface OperatorModel extends CuratedModel {
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+  cost?: { input: number; output: number };
+}
+
+const builtinModels: CuratedModel[] = [
   {
     id: "anthropic/claude-opus-5.5",
     name: "Claude Opus 5.5",
@@ -176,5 +196,41 @@ export const curatedModels = [
     tier: "B",
     icon: "gemini.png",
   },
-] as const;
-export const defaultModelId = "anthropic/claude-sonnet-5.5";
+];
+
+/** Models clients may pick: operator additions first, then the built-in list. */
+export const curatedModels: CuratedModel[] = [...builtinModels];
+/** Live binding: loadOperatorModels() may reassign it. */
+export let defaultModelId = "anthropic/claude-sonnet-5.5";
+
+const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
+
+/**
+ * Operator overrides, read once by the Store before it checks the OpenRouter catalog. Idempotent.
+ *   $DPI_MODELS_FILE (default $DPI_HOME/models.json): { "default"?: id, "models"?: OperatorModel[] }
+ *   $DPI_DEFAULT_MODEL: wins over the file's "default".
+ * Returns the file's models so the store can synthesize entries pi-ai's snapshot does not ship.
+ */
+export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): OperatorModel[] {
+  const home = expand(env.DPI_HOME ?? join(homedir(), ".dpi"));
+  const file = expand(env.DPI_MODELS_FILE ?? join(home, "models.json"));
+  let extras: OperatorModel[] = [];
+  if (existsSync(file)) {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { default?: string; models?: Partial<OperatorModel>[] };
+    extras = (parsed.models ?? []).map((m) => {
+      const { id, name } = m ?? {};
+      if (typeof id !== "string" || typeof name !== "string") throw Error(`${file}: every model needs id and name`);
+      return { ...m, id, name, tier: m.tier ?? "T", icon: m.icon ?? "lab.png" };
+    });
+    for (const m of extras) {
+      const i = curatedModels.findIndex((c) => c.id === m.id);
+      if (i >= 0) curatedModels.splice(i, 1);
+    }
+    curatedModels.unshift(...extras);
+    if (parsed.default) defaultModelId = parsed.default;
+  }
+  if (env.DPI_DEFAULT_MODEL) defaultModelId = env.DPI_DEFAULT_MODEL;
+  if (!curatedModels.some((c) => c.id === defaultModelId))
+    throw Error(`Default model ${defaultModelId} is not in the model list (built-in or ${file})`);
+  return extras;
+}
