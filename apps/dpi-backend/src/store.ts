@@ -39,7 +39,9 @@ import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { curatedModels, defaultModelId, loadOperatorModels } from "./model-catalog.js";
+import { curatedModels, defaultModelId, loadOperatorModels, type OperatorModel, type OperatorProvider } from "./model-catalog.js";
+import { createProvider, envApiKeyAuth, type Model } from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { fauxModels, installFaux } from "./faux.js";
 import {
   Harness,
@@ -179,13 +181,13 @@ export class Store {
   private constructor(readonly options: StoreOptions) {
     if (options.provider === "faux") installFaux(this.models);
     else {
-      const extras = loadOperatorModels();
+      const { models: extras, providers: extraProviders } = loadOperatorModels();
       const provider = openrouterProvider();
       const known = provider.getModels();
       // pi-ai ships a snapshot of OpenRouter; synthesize entries for operator models it lacks.
       const template = known.find((m) => m.id === "inception/mercury-2.5") ?? known[0];
       const synthesized = extras
-        .filter((e) => !known.some((m) => m.id === e.id))
+        .filter((e) => e.provider === "openrouter" && !known.some((m) => m.id === e.id))
         .map((e) => ({
           ...template,
           id: e.id,
@@ -197,11 +199,24 @@ export class Store {
         }));
       const catalog = [...known, ...synthesized];
       for (const model of curatedModels)
-        if (!catalog.some((m) => m.id === model.id)) throw Error(`OpenRouter catalog missing ${model.id}`);
+        if (model.provider === "openrouter" && !catalog.some((m) => m.id === model.id))
+          throw Error(`OpenRouter catalog missing ${model.id}`);
       this.models.setProvider({
         ...provider,
-        getModels: () => catalog.filter((m) => curatedModels.some((c) => c.id === m.id)),
+        getModels: () => catalog.filter((m) => curatedModels.some((c) => c.provider === "openrouter" && c.id === m.id)),
       });
+      // Operator providers (models.json): OpenAI-compatible endpoints such as a local CLIProxyAPI.
+      for (const p of extraProviders)
+        this.models.setProvider(
+          createProvider({
+            id: p.id,
+            name: p.name ?? p.id,
+            baseUrl: p.baseUrl,
+            auth: { apiKey: envApiKeyAuth(`${p.name ?? p.id} API key`, [p.apiKeyEnv]) },
+            models: extras.filter((e) => e.provider === p.id).map((e) => operatorChatModel(p, e)),
+            api: openAICompletionsApi(),
+          }),
+        );
     }
     mkdirSync(options.dataDir, { recursive: true, mode: 0o700 });
     this.unlockCatalog = lockFile(`${this.catalogPath}.lock`);
@@ -294,14 +309,17 @@ export class Store {
         reasoning: false,
         cost: { input: 0, output: 0 },
       }));
-    const available = await this.models.getAvailable("openrouter", { signal: AbortSignal.timeout(10000) });
+    const providerIds = [...new Set(curatedModels.map((c) => c.provider))];
+    const available = (
+      await Promise.all(providerIds.map((id) => this.models.getAvailable(id, { signal: AbortSignal.timeout(10000) })))
+    ).flat();
     return curatedModels.flatMap((c) => {
-      const m = available.find((m) => m.id === c.id);
+      const m = available.find((m) => m.provider === c.provider && m.id === c.id);
       return m
         ? [
             {
               id: m.id,
-              provider: "openrouter",
+              provider: c.provider,
               name: c.name,
               tier: c.tier,
               icon: c.icon,
@@ -319,11 +337,11 @@ export class Store {
       const id = fauxModels.some((m) => m.id === model?.modelId) ? model!.modelId : fauxModels[0].id;
       return { provider: "faux", modelId: id };
     }
-    const exact = model?.provider === "openrouter" ? model.modelId : `${model?.provider}/${model?.modelId}`;
-    return {
-      provider: "openrouter",
-      modelId: curatedModels.some((m) => m.id === exact) ? exact : defaultModelId,
-    };
+    const curated =
+      curatedModels.find((c) => c.provider === model?.provider && c.id === model?.modelId) ??
+      curatedModels.find((c) => c.provider === "openrouter" && c.id === `${model?.provider}/${model?.modelId}`) ??
+      curatedModels.find((c) => c.id === defaultModelId)!;
+    return { provider: curated.provider, modelId: curated.id };
   }
 
   validateModel(model: unknown): ModelRef {
@@ -333,8 +351,7 @@ export class Store {
     const known =
       this.options.provider === "faux"
         ? m.provider === "faux" && fauxModels.some((f) => f.id === m.modelId)
-        : m.provider === "openrouter" &&
-          curatedModels.some((c) => c.id === m.modelId) &&
+        : curatedModels.some((c) => c.provider === m.provider && c.id === m.modelId) &&
           !!this.models.getModel(m.provider, m.modelId);
     if (!known) throw invalid(`Unknown model ${m.provider}/${m.modelId}. Choose one from GET /v1/device models`);
     return { provider: m.provider, modelId: m.modelId };
@@ -1204,3 +1221,19 @@ export class Store {
 }
 
 export type { Resolved };
+
+/** A chat model on an operator provider; cliproxy-style endpoints do not publish metadata, so models.json supplies it. */
+function operatorChatModel(p: OperatorProvider, e: OperatorModel): Model<"openai-completions"> {
+  return {
+    id: e.id,
+    name: e.name,
+    api: "openai-completions",
+    provider: p.id,
+    baseUrl: p.baseUrl,
+    reasoning: e.reasoning ?? false,
+    input: ["text"],
+    cost: { input: e.cost?.input ?? 0, output: e.cost?.output ?? 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: e.contextWindow ?? 128000,
+    maxTokens: e.maxTokens ?? 16000,
+  };
+}

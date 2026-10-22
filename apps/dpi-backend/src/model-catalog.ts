@@ -10,6 +10,17 @@ export interface CuratedModel {
   name: string;
   tier: string;
   icon: string;
+  /** pi-ai provider id: "openrouter" (built-in) or an operator provider from models.json. */
+  provider: string;
+}
+
+/** An extra OpenAI-compatible endpoint (models.json "providers"), e.g. a local CLIProxyAPI. */
+export interface OperatorProvider {
+  id: string;
+  name?: string;
+  baseUrl: string;
+  /** Env var holding the bearer token; the provider is skipped when it is unset. */
+  apiKeyEnv: string;
 }
 
 /** An operator-added model (see loadOperatorModels). The extra fields only matter when pi-ai's
@@ -21,7 +32,7 @@ export interface OperatorModel extends CuratedModel {
   cost?: { input: number; output: number };
 }
 
-const builtinModels: CuratedModel[] = [
+const builtinModels: Omit<CuratedModel, "provider">[] = [
   {
     id: "anthropic/claude-opus-5.5",
     name: "Claude Opus 5.5",
@@ -199,7 +210,7 @@ const builtinModels: CuratedModel[] = [
 ];
 
 /** Models clients may pick: operator additions first, then the built-in list. */
-export const curatedModels: CuratedModel[] = [...builtinModels];
+export const curatedModels: CuratedModel[] = builtinModels.map((m) => ({ ...m, provider: "openrouter" }));
 /** Live binding: loadOperatorModels() may reassign it. */
 export let defaultModelId = "anthropic/claude-sonnet-5.5";
 
@@ -207,20 +218,40 @@ const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join
 
 /**
  * Operator overrides, read once by the Store before it checks the OpenRouter catalog. Idempotent.
- *   $DPI_MODELS_FILE (default $DPI_HOME/models.json): { "default"?: id, "models"?: OperatorModel[] }
+ *   $DPI_MODELS_FILE (default $DPI_HOME/models.json):
+ *     { "default"?: id, "providers"?: OperatorProvider[], "models"?: OperatorModel[] }
  *   $DPI_DEFAULT_MODEL: wins over the file's "default".
- * Returns the file's models so the store can synthesize entries pi-ai's snapshot does not ship.
+ * A model's "provider" defaults to "openrouter"; any other value must name an entry in "providers".
+ * Returns the file's models and providers so the store can register them with pi-ai.
  */
-export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): OperatorModel[] {
+export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): {
+  models: OperatorModel[];
+  providers: OperatorProvider[];
+} {
   const home = expand(env.DPI_HOME ?? join(homedir(), ".dpi"));
   const file = expand(env.DPI_MODELS_FILE ?? join(home, "models.json"));
   let extras: OperatorModel[] = [];
+  let providers: OperatorProvider[] = [];
   if (existsSync(file)) {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as { default?: string; models?: Partial<OperatorModel>[] };
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as {
+      default?: string;
+      providers?: Partial<OperatorProvider>[];
+      models?: Partial<OperatorModel>[];
+    };
+    providers = (parsed.providers ?? []).map((p) => {
+      const { id, baseUrl, apiKeyEnv } = p ?? {};
+      if (typeof id !== "string" || typeof baseUrl !== "string" || typeof apiKeyEnv !== "string")
+        throw Error(`${file}: every provider needs id, baseUrl and apiKeyEnv`);
+      if (id === "openrouter" || id === "faux") throw Error(`${file}: provider id ${id} is reserved`);
+      return { ...p, id, baseUrl, apiKeyEnv };
+    });
     extras = (parsed.models ?? []).map((m) => {
       const { id, name } = m ?? {};
       if (typeof id !== "string" || typeof name !== "string") throw Error(`${file}: every model needs id and name`);
-      return { ...m, id, name, tier: m.tier ?? "T", icon: m.icon ?? "lab.png" };
+      const provider = m.provider ?? "openrouter";
+      if (provider !== "openrouter" && !providers.some((p) => p.id === provider))
+        throw Error(`${file}: model ${id} names provider ${provider}, which is not in "providers"`);
+      return { ...m, id, name, provider, tier: m.tier ?? "T", icon: m.icon ?? "lab.png" };
     });
     for (const m of extras) {
       const i = curatedModels.findIndex((c) => c.id === m.id);
@@ -232,5 +263,5 @@ export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): Operat
   if (env.DPI_DEFAULT_MODEL) defaultModelId = env.DPI_DEFAULT_MODEL;
   if (!curatedModels.some((c) => c.id === defaultModelId))
     throw Error(`Default model ${defaultModelId} is not in the model list (built-in or ${file})`);
-  return extras;
+  return { models: extras, providers };
 }
