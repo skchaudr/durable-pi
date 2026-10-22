@@ -34,7 +34,7 @@ export type Verb =
 
 export type Driver = Partial<Record<Verb, (device: NetDevice, ctx: DriverContext) => Promise<void>>>;
 
-export const SERVICE_LABEL = "dev.dpi.backend";
+export const SERVICE_LABEL = "com.sab.dpi-backend";
 export const SYSTEMD_UNIT = "dpi-backend";
 const NVM_INSTALL = "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh";
 
