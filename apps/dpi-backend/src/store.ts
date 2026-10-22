@@ -39,7 +39,14 @@ import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { curatedModels, defaultModelId, loadOperatorModels, type OperatorModel, type OperatorProvider } from "./model-catalog.js";
+import {
+  curatedModels,
+  defaultModelId,
+  defaultThinkingLevel,
+  loadOperatorModels,
+  type OperatorModel,
+  type OperatorProvider,
+} from "./model-catalog.js";
 import { createProvider, envApiKeyAuth, type Model } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { fauxModels, installFaux } from "./faux.js";
@@ -449,7 +456,7 @@ export class Store {
       model: model.modelId,
       provider: model.provider,
     };
-    await this.openAgent(row, true, body.thinkingLevel ?? "low");
+    await this.openAgent(row, true, body.thinkingLevel ?? (defaultThinkingLevel as ThinkingLevel));
     this.catalog.exec("BEGIN");
     try {
       this.catalog
@@ -1231,6 +1238,7 @@ function operatorChatModel(p: OperatorProvider, e: OperatorModel): Model<"openai
     provider: p.id,
     baseUrl: p.baseUrl,
     reasoning: e.reasoning ?? false,
+    ...(e.reasoning ? { thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" } } : {}),
     input: ["text"],
     cost: { input: e.cost?.input ?? 0, output: e.cost?.output ?? 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: e.contextWindow ?? 128000,

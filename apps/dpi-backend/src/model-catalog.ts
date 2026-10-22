@@ -211,16 +211,18 @@ const builtinModels: Omit<CuratedModel, "provider">[] = [
 
 /** Models clients may pick: operator additions first, then the built-in list. */
 export const curatedModels: CuratedModel[] = builtinModels.map((m) => ({ ...m, provider: "openrouter" }));
-/** Live binding: loadOperatorModels() may reassign it. */
+/** Live bindings: loadOperatorModels() may reassign them. */
 export let defaultModelId = "anthropic/claude-sonnet-5.5";
+/** Thinking level a new session starts at when the client sends none ("off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"). */
+export let defaultThinkingLevel = "low";
 
 const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
 
 /**
  * Operator overrides, read once by the Store before it checks the OpenRouter catalog. Idempotent.
  *   $DPI_MODELS_FILE (default $DPI_HOME/models.json):
- *     { "default"?: id, "providers"?: OperatorProvider[], "models"?: OperatorModel[] }
- *   $DPI_DEFAULT_MODEL: wins over the file's "default".
+ *     { "default"?: id, "thinking"?: level, "providers"?: OperatorProvider[], "models"?: OperatorModel[] }
+ *   $DPI_DEFAULT_MODEL / $DPI_DEFAULT_THINKING: win over the file's "default" / "thinking".
  * A model's "provider" defaults to "openrouter"; any other value must name an entry in "providers".
  * Returns the file's models and providers so the store can register them with pi-ai.
  */
@@ -235,6 +237,7 @@ export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): {
   if (existsSync(file)) {
     const parsed = JSON.parse(readFileSync(file, "utf8")) as {
       default?: string;
+      thinking?: string;
       providers?: Partial<OperatorProvider>[];
       models?: Partial<OperatorModel>[];
     };
@@ -259,8 +262,10 @@ export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): {
     }
     curatedModels.unshift(...extras);
     if (parsed.default) defaultModelId = parsed.default;
+    if (parsed.thinking) defaultThinkingLevel = parsed.thinking;
   }
   if (env.DPI_DEFAULT_MODEL) defaultModelId = env.DPI_DEFAULT_MODEL;
+  if (env.DPI_DEFAULT_THINKING) defaultThinkingLevel = env.DPI_DEFAULT_THINKING;
   if (!curatedModels.some((c) => c.id === defaultModelId))
     throw Error(`Default model ${defaultModelId} is not in the model list (built-in or ${file})`);
   return { models: extras, providers };
