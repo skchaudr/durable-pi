@@ -546,7 +546,7 @@ export class Store {
       registry.install(CodingTools);
       const jobs = createJobs({ shared: this.shared, sessionId: row.id });
       const compaction = () => this.compactionOf(row.id);
-      const playground = createPlayground(this.shared, row.id, this.spawnSession, jobs);
+      const playground = createPlayground(this.shared, row.id, this.spawnSession, jobs, (m) => this.validateModel(m));
       registry.install(playground);
       // Custom extensions are installed but not selected: an agent turns them on in its own selection.
       const addons = createAddons({ offline: this.options.provider === "faux" });

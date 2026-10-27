@@ -100,7 +100,15 @@ export type SpawnSession = (input: {
   prompt?: string;
 }) => Promise<{ session: SessionSummary; submissionId?: number }>;
 
-export function createPlayground(shared: SharedState, sessionId: string, spawn: SpawnSession, jobs: Jobs) {
+export type ValidateModel = (model: { provider: string; modelId: string }) => { provider: string; modelId: string };
+
+export function createPlayground(
+  shared: SharedState,
+  sessionId: string,
+  spawn: SpawnSession,
+  jobs: Jobs,
+  validateModel?: ValidateModel,
+) {
   const readAppState = defineTool({
     name: "read_state",
     description:
@@ -395,16 +403,55 @@ export function createPlayground(shared: SharedState, sessionId: string, spawn: 
     name: "subagent",
     description:
       "Delegate a self-contained task to an owned child conversation. Parent interruption also interrupts the child.",
-    parameters: Type.Object({ task: Type.String() }),
+    parameters: Type.Object({
+      task: Type.String(),
+      model: Type.Optional(
+        Type.String({
+          description:
+            "Model for the child: a model id from this device model list, or provider/modelId. Default: your current model.",
+        }),
+      ),
+      thinkingLevel: Type.Optional(
+        Type.String({ description: `Reasoning level for the child: ${THINKING_LEVELS.join(", ")}. Default: yours.` }),
+      ),
+    }),
     replay: "safe",
     execute: async (args, api, ctx) => {
+      const parent = await api.agent(ctx);
+      let model: { provider: string; modelId: string } | undefined;
+      if (args.model) {
+        if (!validateModel) throw Error("Choosing a subagent model is not available here");
+        const candidates: { provider: string; modelId: string }[] = [];
+        if (parent.model) candidates.push({ provider: parent.model.provider, modelId: args.model });
+        const slash = args.model.indexOf("/");
+        if (slash > 0) candidates.push({ provider: args.model.slice(0, slash), modelId: args.model.slice(slash + 1) });
+        let lastError: unknown;
+        for (const c of candidates) {
+          try {
+            model = validateModel(c);
+            break;
+          } catch (e) {
+            lastError = e;
+          }
+        }
+        if (!model) throw lastError instanceof Error ? lastError : Error(`Unknown model ${args.model}`);
+      }
+      const thinkingLevel = args.thinkingLevel
+        ? THINKING_LEVELS.find((level) => level === args.thinkingLevel)
+        : undefined;
+      if (args.thinkingLevel && !thinkingLevel)
+        throw Error(`Invalid thinkingLevel ${args.thinkingLevel}. Use one of: ${THINKING_LEVELS.join(", ")}`);
       const id = await api.commit(async (tx) => {
         const found = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
         if (found) return found.id;
         const child = await tx.createConversation({
           ownership: { kind: "task", taskId: api.taskId },
         });
-        await configure(tx, child.id, { tools: { remove: [subagent] } });
+        await configure(tx, child.id, {
+          tools: { remove: [subagent] },
+          ...(model ? { model } : {}),
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+        });
         return child.id;
       }, ctx);
       await api.details({ conversationId: id }, ctx);
