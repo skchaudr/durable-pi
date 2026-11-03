@@ -219,7 +219,11 @@ export class Store {
       const anthropicIds = curatedModels.filter((c) => c.provider === "anthropic").map((c) => c.id);
       if (anthropicIds.length) {
         const anthropic = anthropicProvider();
-        const all = anthropic.getModels();
+        // A key not scoped to a workspace must name one per request; pi-ai only reads this env for federation.
+        const workspace = process.env.ANTHROPIC_WORKSPACE_ID;
+        const all = anthropic
+          .getModels()
+          .map((m) => (workspace ? { ...m, headers: { ...m.headers, "anthropic-workspace-id": workspace } } : m));
         for (const id of anthropicIds) if (!all.some((m) => m.id === id)) throw Error(`Anthropic catalog missing ${id}`);
         this.models.setProvider({ ...anthropic, getModels: () => all.filter((m) => anthropicIds.includes(m.id)) });
       }
