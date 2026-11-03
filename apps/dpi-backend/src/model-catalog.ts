@@ -21,9 +21,6 @@ export interface OperatorProvider {
   baseUrl: string;
   /** Env var holding the bearer token; the provider is skipped when it is unset. */
   apiKeyEnv: string;
-  /** A Pi models.json (e.g. "~/.pi/agent/models.json") whose provider of the same id lists this provider's models.
-   *  That list wins: models.json entries for this provider only add metadata to ids in it. */
-  modelsFrom?: string;
 }
 
 /** An operator-added model (see loadOperatorModels). The extra fields only matter when pi-ai's
@@ -230,7 +227,6 @@ const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join
  *   $DPI_DEFAULT_MODEL / $DPI_DEFAULT_THINKING: win over the file's "default" / "thinking".
  * "builtin": false drops the built-in OpenRouter list above, leaving only the file's models.
  * A model's "provider" defaults to "openrouter"; any other value must name an entry in "providers".
- * A provider with "modelsFrom" takes its model ids from that Pi file; a model's "name" defaults to its id.
  * Returns the file's models and providers so the store can register them with pi-ai.
  */
 export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): {
@@ -257,21 +253,8 @@ export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): {
       if (id === "openrouter" || id === "faux") throw Error(`${file}: provider id ${id} is reserved`);
       return { ...p, id, baseUrl, apiKeyEnv };
     });
-    const listed = parsed.models ?? [];
-    let entries: Partial<OperatorModel>[] = [];
-    for (const p of providers) {
-      if (!p.modelsFrom) continue;
-      const piFile = expand(p.modelsFrom);
-      const pi = JSON.parse(readFileSync(piFile, "utf8")) as { providers?: Record<string, { models?: { id?: string }[] }> };
-      const ids = (pi.providers?.[p.id]?.models ?? []).map((m) => m.id).filter((id): id is string => typeof id === "string");
-      if (!ids.length) throw Error(`${piFile}: no models for provider ${p.id}`);
-      entries.push(...ids.map((id) => ({ ...listed.find((m) => m?.provider === p.id && m.id === id), id, provider: p.id })));
-    }
-    const fromPi = new Set(providers.filter((p) => p.modelsFrom).map((p) => p.id));
-    entries = [...entries, ...listed.filter((m) => !fromPi.has(m?.provider ?? "openrouter"))];
-    extras = entries.map((m) => {
-      const { id } = m ?? {};
-      const name = m.name ?? (m.provider && fromPi.has(m.provider) ? id : undefined);
+    extras = (parsed.models ?? []).map((m) => {
+      const { id, name } = m ?? {};
       if (typeof id !== "string" || typeof name !== "string") throw Error(`${file}: every model needs id and name`);
       const provider = m.provider ?? "openrouter";
       if (provider !== "openrouter" && !providers.some((p) => p.id === provider))
