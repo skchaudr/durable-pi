@@ -203,6 +203,7 @@ export class Store {
           contextWindow: e.contextWindow ?? template.contextWindow,
           maxTokens: e.maxTokens ?? template.maxTokens,
           reasoning: e.reasoning ?? template.reasoning,
+          ...(e.input ? { input: e.input } : {}),
           cost: { ...template.cost, input: e.cost?.input ?? 0, output: e.cost?.output ?? 0 },
         }));
       const catalog = [...known, ...synthesized];
@@ -1248,7 +1249,7 @@ function operatorChatModel(p: OperatorProvider, e: OperatorModel): Model<"openai
     baseUrl: p.baseUrl,
     reasoning: e.reasoning ?? false,
     ...(e.reasoning ? { thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" } } : {}),
-    input: ["text"],
+    input: e.input ?? ["text"],
     cost: { input: e.cost?.input ?? 0, output: e.cost?.output ?? 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: e.contextWindow ?? 128000,
     maxTokens: e.maxTokens ?? 16000,

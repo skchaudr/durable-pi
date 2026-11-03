@@ -1,6 +1,10 @@
 import type { SharedState } from "./shared-state.js";
 import { Type } from "@earendil-works/pi-ai";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile, rm, stat } from "node:fs/promises";
 import { readState, type AppState } from "../../dpi-sdk/src/app-state.js";
 import type { SessionSummary, ThinkingLevel } from "../../dpi-sdk/src/api.js";
 import { THINKING_LEVELS } from "../../dpi-sdk/src/api.js";
@@ -520,6 +524,41 @@ export function createPlayground(
       };
     },
   });
+  // view_image: pi-durable's read tool refuses images, so this returns one as an image block. Large images are
+  // downscaled with macOS sips first. Models without "image" in their input get pi-ai's placeholder instead.
+  const viewImage = defineTool({
+    name: "view_image",
+    description:
+      "Look at an image file (png, jpg, gif, webp, heic). Use it whenever the user shares a screenshot or image path. Relative paths resolve against your working directory; ~ is expanded. Screenshots synced from sab-air land in ~/dpi-work/inbox.",
+    parameters: Type.Object({
+      path: Type.String({ description: "Image file path" }),
+      max_px: Type.Optional(Type.Number({ description: "Longest side after downscaling. Default 1600, max 2400." })),
+    }),
+    replay: "safe",
+    execute: async (args, api, ctx) => {
+      const agent = await api.agent(ctx);
+      const raw = args.path.startsWith("~") ? join(homedir(), args.path.slice(1)) : args.path;
+      const file = isAbsolute(raw) ? raw : resolve(agent.cwd ?? ".", raw);
+      const info = await stat(file);
+      if (!info.isFile()) throw Error(`${file} is not a file`);
+      const max = Math.min(Math.max(Math.round(args.max_px ?? 1600), 256), 2400);
+      const out = join(tmpdir(), `dpi-view-${process.pid}-${Date.now()}.jpg`);
+      try {
+        await promisify(execFile)("sips", ["-s", "format", "jpeg", "-s", "formatOptions", "80", "-Z", String(max), file, "--out", out], {
+          timeout: 30_000,
+        });
+        const data = (await readFile(out)).toString("base64");
+        return {
+          content: [
+            { type: "text", text: `${file} (${Math.round(info.size / 1024)} KB, sent as JPEG, longest side <= ${max}px)` },
+            { type: "image", data, mimeType: "image/jpeg" },
+          ],
+        };
+      } finally {
+        await rm(out, { force: true });
+      }
+    },
+  });
   const handoff = defineTool({
     name: "handoff",
     description:
@@ -543,6 +582,7 @@ export function createPlayground(
       pingOnCall,
       subagent,
       startSession,
+      viewImage,
       handoff,
     ],
     sections: [

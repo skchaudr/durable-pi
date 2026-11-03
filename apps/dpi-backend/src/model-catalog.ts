@@ -30,6 +30,8 @@ export interface OperatorModel extends CuratedModel {
   maxTokens?: number;
   reasoning?: boolean;
   cost?: { input: number; output: number };
+  /** Accepted inputs; add "image" for vision models so images reach them instead of a placeholder. Default ["text"]. */
+  input?: ("text" | "image")[];
 }
 
 const builtinModels: Omit<CuratedModel, "provider">[] = [
