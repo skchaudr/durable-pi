@@ -1,7 +1,7 @@
 // Traces for dpi agents, the backend's counterpart of the Pi extensions ~/.pi/agent/extensions/{traces,otlp-observe}.ts,
 // which never load here. After each commit it reads the session's new entries and, per agent (conversation):
 //
-//   grok-traces   `grok-traces hook dpi` with the traces.ts payload, so the index re-reads agent.sqlite
+//   grok-traces   `grok-traces hook dpi` per Pi lifecycle event (traces.ts payload), so the index re-reads agent.sqlite
 //   Phoenix       one span per tool result and per assistant message, via the same otlp-ship.py subprocess
 //
 // Both are fire-and-forget detached children: a missing binary or a dead collector costs nothing.
@@ -38,14 +38,10 @@ interface Row {
 const md5 = (s: string) => createHash("md5").update(s).digest("hex");
 const ns = (ms: number | undefined) => (BigInt(Math.round(ms ?? Date.now())) * 1_000_000n).toString();
 
-function detached(bin: string, args: string[], stdin?: string, env?: NodeJS.ProcessEnv) {
+function detached(bin: string, args: string[], env: NodeJS.ProcessEnv) {
   try {
-    const child = spawn(bin, args, { stdio: [stdin ? "pipe" : "ignore", "ignore", "ignore"], detached: true, env });
+    const child = spawn(bin, args, { stdio: "ignore", detached: true, env });
     child.on("error", () => {});
-    if (stdin) {
-      child.stdin?.on("error", () => {});
-      child.stdin?.end(stdin);
-    }
     child.unref();
   } catch {}
 }
@@ -94,15 +90,29 @@ export function observeSession(
         "--session", agentId(conv),
         "--status", s.error ? "ERROR" : "OK",
       ],
-      undefined,
       { ...process.env, OBS_OTLP_GRPC: GRPC, OBS_OTLP_PROJECT: PROJECT },
     );
   }
 
+  // Hooks run one at a time: grok-traces orders receipts by arrival, and `live` needs agent_end after the last tool.
+  let hooks = Promise.resolve();
   function hook(conv: number, event: string, extra: Record<string, unknown> = {}) {
     if (!traces) return;
-    const body = { event, tool: "", cwd: session.cwd, session_id: agentId(conv), session_file: session.dbPath, ...extra };
-    detached(TRACES_BIN, ["hook", "dpi"], JSON.stringify(body));
+    const body = { event, tool: "", cwd: session.cwd, session_id: agentId(conv), session_file: session.dbPath, harness_pid: process.pid, ...extra };
+    hooks = hooks.then(
+      () =>
+        new Promise<void>((done) => {
+          try {
+            const child = spawn(TRACES_BIN, ["hook", "dpi"], { stdio: ["pipe", "ignore", "ignore"] });
+            child.on("error", () => done());
+            child.on("close", () => done());
+            child.stdin?.on("error", () => {});
+            child.stdin?.end(JSON.stringify(body));
+          } catch {
+            done();
+          }
+        }),
+    );
   }
 
   function entry(conv: number, kind: string, msg: Message | undefined) {
@@ -111,16 +121,25 @@ export function observeSession(
       span(conv, { root: true, kind: "CHAIN", name: "dpi agent", start: msg?.timestamp, event: "session_start" });
     }
     if (!msg) return;
+    // grok-traces gets Pi's event names (agent_start, tool_execution_start/end, agent_end), derived from entries.
+    if (kind === "pi.user") hook(conv, "agent_start");
     if (kind === "pi.assistant" && msg.role === "assistant") {
       span(conv, { kind: "LLM", name: "dpi turn", start: msg.timestamp, event: "turn_end" });
+      let toolCalls = 0;
       for (const block of Array.isArray(msg.content) ? msg.content : [])
-        if (block?.type === "toolCall" && typeof block.id === "string")
-          calls.set(block.id, { at: msg.timestamp ?? Date.now(), tool: String(block.name ?? "") });
+        if (block?.type === "toolCall" && typeof block.id === "string") {
+          toolCalls++;
+          const tool = String(block.name ?? "");
+          calls.set(block.id, { at: msg.timestamp ?? Date.now(), tool });
+          hook(conv, "tool_execution_start", { tool, tool_use_id: block.id, tool_input: block.arguments ?? {} });
+        }
+      if (!toolCalls) hook(conv, "agent_end");
     } else if (kind === "pi.tool-result" && msg.role === "toolResult") {
       const call = msg.toolCallId ? calls.get(msg.toolCallId) : undefined;
       if (msg.toolCallId) calls.delete(msg.toolCallId);
       const tool = msg.toolName ?? call?.tool ?? "";
       span(conv, { kind: "TOOL", name: `dpi tool:${tool}`, start: call?.at ?? msg.timestamp, end: msg.timestamp, tool, error: msg.isError, event: "tool_result" });
+      hook(conv, "tool_execution_end", { tool, tool_use_id: msg.toolCallId ?? "" });
     }
   }
 
@@ -128,15 +147,11 @@ export function observeSession(
   function drain() {
     timer = undefined;
     try {
-      const touched = new Map<number, string>();
       for (const row of next.all(cursor) as unknown as Row[]) {
         cursor = row.id;
         const record = JSON.parse(row.record) as { kind?: string; model?: Message[] };
-        const kind = String(record.kind ?? "");
-        entry(row.conversation_id, kind, record.model?.at(-1));
-        touched.set(row.conversation_id, kind === "pi.tool-result" ? "tool_result" : "turn_end");
+        entry(row.conversation_id, String(record.kind ?? ""), record.model?.at(-1));
       }
-      for (const [conv, event] of touched) hook(conv, event);
     } catch {}
   }
 
