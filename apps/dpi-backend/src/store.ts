@@ -67,6 +67,7 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { createPlayground, Workspace, type SpawnSession } from "./extensions.js";
+import { observeSession } from "./observe.js";
 import { createJobs, JobRuns, JOB_DEFS, jobDef, resolveJobInput, type Jobs } from "./jobs.js";
 import { ADDON_INFO, createAddons, PROMPTS, PromptChecklist, type Addons } from "./addons.js";
 import { JOB_RUNS_DOC } from "../../dpi-sdk/src/jobs.js";
@@ -592,7 +593,15 @@ export class Store {
       row.provider = rootModel.provider;
       row.model = rootModel.modelId;
       this.catalog.prepare("UPDATE sessions SET provider=?,model=? WHERE id=?").run(row.provider, row.model, row.id);
-      const unsubscribe = harness.subscribeCommits(() => this.notify());
+      const offNotify = harness.subscribeCommits(() => this.notify());
+      const offObserve =
+        this.options.provider === "faux" || process.env.DPI_OBSERVE === "0"
+          ? () => {}
+          : observeSession(row, (fn) => harness.subscribeCommits(fn));
+      const unsubscribe = () => {
+        offNotify();
+        offObserve();
+      };
       this.opened.set(row.id, { harness, unlock, unsubscribe, jobs, addons });
       this.errors.delete(row.id);
       if (create) harness.resume();
