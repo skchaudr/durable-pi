@@ -1,3 +1,9 @@
+---
+title: "Durable Pi: The Durable Agent Network"
+date: 2026-11-01
+tags: []
+---
+
 # Durable Pi: The Durable Agent Network
 
 > **Proactive agents start working before you sit down. They don't wait for you to work. They work for you, then wait.**
