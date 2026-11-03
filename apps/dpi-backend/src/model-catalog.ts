@@ -10,7 +10,7 @@ export interface CuratedModel {
   name: string;
   tier: string;
   icon: string;
-  /** pi-ai provider id: "openrouter" (built-in) or an operator provider from models.json. */
+  /** pi-ai provider id: "openrouter" or "anthropic" (built-in) or an operator provider from models.json. */
   provider: string;
 }
 
@@ -218,6 +218,9 @@ export let defaultModelId = "anthropic/claude-sonnet-5.5";
 /** Thinking level a new session starts at when the client sends none ("off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"). */
 export let defaultThinkingLevel = "low";
 
+/** Providers pi-ai ships natively; models.json may list their models without a "providers" entry. */
+export const BUILTIN_PROVIDERS = ["openrouter", "anthropic"];
+
 const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
 
 /**
@@ -226,7 +229,8 @@ const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join
  *     { "default"?: id, "thinking"?: level, "builtin"?: false, "providers"?: OperatorProvider[], "models"?: OperatorModel[] }
  *   $DPI_DEFAULT_MODEL / $DPI_DEFAULT_THINKING: win over the file's "default" / "thinking".
  * "builtin": false drops the built-in OpenRouter list above, leaving only the file's models.
- * A model's "provider" defaults to "openrouter"; any other value must name an entry in "providers".
+ * A model's "provider" defaults to "openrouter"; "anthropic" uses pi-ai's native Anthropic API ($ANTHROPIC_API_KEY);
+ * any other value must name an entry in "providers".
  * Returns the file's models and providers so the store can register them with pi-ai.
  */
 export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): {
@@ -250,14 +254,14 @@ export function loadOperatorModels(env: NodeJS.ProcessEnv = process.env): {
       const { id, baseUrl, apiKeyEnv } = p ?? {};
       if (typeof id !== "string" || typeof baseUrl !== "string" || typeof apiKeyEnv !== "string")
         throw Error(`${file}: every provider needs id, baseUrl and apiKeyEnv`);
-      if (id === "openrouter" || id === "faux") throw Error(`${file}: provider id ${id} is reserved`);
+      if (BUILTIN_PROVIDERS.includes(id) || id === "faux") throw Error(`${file}: provider id ${id} is reserved`);
       return { ...p, id, baseUrl, apiKeyEnv };
     });
     extras = (parsed.models ?? []).map((m) => {
       const { id, name } = m ?? {};
       if (typeof id !== "string" || typeof name !== "string") throw Error(`${file}: every model needs id and name`);
       const provider = m.provider ?? "openrouter";
-      if (provider !== "openrouter" && !providers.some((p) => p.id === provider))
+      if (!BUILTIN_PROVIDERS.includes(provider) && !providers.some((p) => p.id === provider))
         throw Error(`${file}: model ${id} names provider ${provider}, which is not in "providers"`);
       return { ...m, id, name, provider, tier: m.tier ?? "T", icon: m.icon ?? "lab.png" };
     });

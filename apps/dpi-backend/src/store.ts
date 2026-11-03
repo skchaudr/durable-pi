@@ -39,6 +39,7 @@ import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as ctx, withAbortSignal } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import {
   curatedModels,
   defaultModelId,
@@ -214,6 +215,14 @@ export class Store {
         ...provider,
         getModels: () => catalog.filter((m) => curatedModels.some((c) => c.provider === "openrouter" && c.id === m.id)),
       });
+      // Native Anthropic (models.json models with provider "anthropic"); auth from $ANTHROPIC_API_KEY.
+      const anthropicIds = curatedModels.filter((c) => c.provider === "anthropic").map((c) => c.id);
+      if (anthropicIds.length) {
+        const anthropic = anthropicProvider();
+        const all = anthropic.getModels();
+        for (const id of anthropicIds) if (!all.some((m) => m.id === id)) throw Error(`Anthropic catalog missing ${id}`);
+        this.models.setProvider({ ...anthropic, getModels: () => all.filter((m) => anthropicIds.includes(m.id)) });
+      }
       // Operator providers (models.json): OpenAI-compatible endpoints such as a local CLIProxyAPI.
       for (const p of extraProviders)
         this.models.setProvider(
