@@ -221,9 +221,33 @@ export class Store {
         const anthropic = anthropicProvider();
         // A key not scoped to a workspace must name one per request; pi-ai only reads this env for federation.
         const workspace = process.env.ANTHROPIC_WORKSPACE_ID;
-        const all = anthropic
-          .getModels()
-          .map((m) => (workspace ? { ...m, headers: { ...m.headers, "anthropic-workspace-id": workspace } } : m));
+        const native = anthropic.getModels();
+        // pi-ai's catalog lags new releases (e.g. Haiku 5.5): synthesize from the current-generation
+        // Sonnet entry (adaptive-only thinking), taking limits and price from models.json.
+        const aTemplate = native.find((m) => m.id === "claude-sonnet-5-5") ?? native[0];
+        const ratio = (n: number) => n / (aTemplate.cost.input || 1);
+        const aSynth = extras
+          .filter((e) => e.provider === "anthropic" && !native.some((m) => m.id === e.id))
+          .map((e) => {
+            const input = e.cost?.input ?? aTemplate.cost.input;
+            return {
+              ...aTemplate,
+              id: e.id,
+              name: e.name,
+              contextWindow: e.contextWindow ?? aTemplate.contextWindow,
+              maxTokens: e.maxTokens ?? aTemplate.maxTokens,
+              ...(e.input ? { input: e.input } : {}),
+              cost: {
+                input,
+                output: e.cost?.output ?? aTemplate.cost.output,
+                cacheRead: input * ratio(aTemplate.cost.cacheRead),
+                cacheWrite: input * ratio(aTemplate.cost.cacheWrite),
+              },
+            };
+          });
+        const all = [...native, ...aSynth].map((m) =>
+          workspace ? { ...m, headers: { ...m.headers, "anthropic-workspace-id": workspace } } : m,
+        );
         for (const id of anthropicIds) if (!all.some((m) => m.id === id)) throw Error(`Anthropic catalog missing ${id}`);
         this.models.setProvider({ ...anthropic, getModels: () => all.filter((m) => anthropicIds.includes(m.id)) });
       }
