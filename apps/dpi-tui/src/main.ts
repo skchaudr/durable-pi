@@ -16,7 +16,7 @@ const USAGE = `usage: dpi-tui <device>[:<session>[:<agent>]] [options]
   -a, --agent <ref>     agent id, "main" or name (default: the session's root agent)
   --new <name>          create a session on the device and attach
   --cwd <dir>           working directory on the device for --new (absolute, or relative to its first start dir)
-  --model <id>          model for --new (default: the device's default)
+  --model <ref>         model for --new: provider/id or id (default: the device's default)
   --url, --token        connect to any dpi-backend directly (also DPI_URL, DPI_TOKEN)
   --save <id>           store a --url device in ~/.dpi/network.sqlite under <id>`;
 
@@ -82,8 +82,10 @@ let session = sessionRef;
 if (values.new) {
   const cwd = values.cwd ?? (await client.dirs("")).dirs[0]?.path;
   if (!cwd) fail(`${device.id} has no start dirs; pass --cwd`);
+  // provider/id picks between providers serving the same id; else the id alone (it may contain a slash).
   const modelId = values.model ?? info.defaultModel;
-  const model = info.models.find((m) => m.id === modelId);
+  const model =
+    info.models.find((m) => `${m.provider}/${m.id}` === modelId) ?? info.models.find((m) => m.id === modelId);
   if (!model) fail(`Unknown model ${modelId}. Available: ${info.models.map((m) => m.id).join(", ")}`);
   const created = await client
     .createSession({ name: values.new, cwd, model: { provider: model.provider, modelId: model.id } })
