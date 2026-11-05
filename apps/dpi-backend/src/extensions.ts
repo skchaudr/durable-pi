@@ -129,7 +129,7 @@ export function createPlayground(
   const updateState = defineTool({
     name: "update_state",
     description:
-      'CRUD the same shared App State for every agent and fork in this demo. create adds a new field, update replaces an existing value, delete removes it, increment adds a signed number. value_json must be JSON-encoded text: 3 for a number, true for a boolean, "hello" (including quotes) for a string, {"enabled":true} for an object, or [1,2] for an array. Omit value_json for delete. Use JSON Pointer paths: /counter, /settings/enabled, /notes/- to append. Escape ~ as ~0 and / as ~1. Empty path with update replaces the whole root object, with delete clears it. Read first with read_state. UI controls update live. Changes are atomic and replay-safe.',
+      'CRUD the shared App State used by every agent and fork on this device. create adds a new field, update replaces an existing value, delete removes it, increment adds a signed number. value_json must be JSON-encoded text: 3 for a number, true for a boolean, "hello" (including quotes) for a string, {"enabled":true} for an object, or [1,2] for an array. Omit value_json for delete. Use JSON Pointer paths: /counter, /settings/enabled, /notes/- to append. Escape ~ as ~0 and / as ~1. Empty path with update replaces the whole root object, with delete clears it. Read first with read_state. UI controls update live. Changes are atomic and replay-safe.',
     parameters: Type.Object({
       operation: Type.Union([
         Type.Literal("create"),
@@ -213,7 +213,7 @@ export function createPlayground(
   const runJob = defineTool({
     name: "run_durable_job",
     description:
-      'Start a durable job: a repeatable workflow with named phases that runs as one checkpointed task and shows live in the chat. Call list_durable_jobs first for ids and inputs. It runs in the background: you get its task id at once, the conversation owns the run, and you check it with check_durable_job. Set wait true only when the user wants you to wait for the result; then the call owns the run, an interrupt stops it, and you get the outcome of every phase. Example: {"job":"workspace-snapshot","input":{"path":"."}}.',
+      'Start a durable job: a repeatable workflow with named phases that runs as one checkpointed task and is recorded in the conversation. Call list_durable_jobs first for ids and inputs. It runs in the background: you get its task id at once, the conversation owns the run, and you check it with check_durable_job. Set wait true only when you need the result before continuing; then the call owns the run, an interrupt stops it, and you get the outcome of every phase. Example: {"job":"workspace-snapshot","input":{"path":"."}}.',
     parameters: Type.Object({
       job: Type.String({ description: "Job id from list_durable_jobs." }),
       input: Type.Optional(
@@ -370,34 +370,24 @@ export function createPlayground(
   const pingOnCall = defineTool({
     name: "ping_on_call_engineer",
     description:
-      "Page the human on-call engineer with a short summary. A real side effect: it is not replay-safe, so a crash returns an interrupted result instead of paging again, and it works once per agent. Only use it when the user asks you to page someone.",
+      "Not built yet: records a page for Sab but sends it nowhere, so he is not reached. Being wired to a real channel.",
     parameters: Type.Object({
       summary: Type.String({ description: "What the engineer needs to know, one or two sentences." }),
       severity: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("high"), Type.Literal("critical")])),
     }),
     execute: async (args, api, ctx) => {
-      const prior = await api.snapshot(Pager, api.conversationId, ctx);
-      if (prior?.paged)
-        throw Error(
-          `Already paged at ${new Date(prior.at).toISOString()} (${prior.page}). ping_on_call_engineer works once per agent.`,
-        );
       const severity = args.severity ?? "high";
       const page = `PG-${String(api.taskId).padStart(4, "0")}`;
-      api.output("Dialing the on-call engineer…\n");
-      await pause(1500);
       await api.commit(async (tx) => {
         const pager = await tx.doc(Pager, api.conversationId);
-        if (pager.paged) throw Error(`Already paged (${pager.page}).`);
         Object.assign(pager, { paged: true, at: Date.now(), page, summary: args.summary.slice(0, 300) });
       }, ctx);
-      api.output(`Paged on-call, ${severity} severity: ${page}\nWaiting for acknowledgement…\n`);
-      await pause(1500);
-      api.output("Acknowledged.\n");
+      api.output(`Recorded ${page} (${severity}). Not delivered: the pager has no channel yet.\n`);
       return {
         content: [
           {
             type: "text",
-            text: `Paged the on-call engineer (${page}, ${severity}). They acknowledged. Do not page again for this.`,
+            text: `NOT delivered: recorded ${page} (${severity}), but ping_on_call_engineer has no real channel yet, so Sab was not reached and nobody acknowledged.`,
           },
         ],
       };
@@ -589,7 +579,7 @@ export function createPlayground(
       section(
         "playground",
         () =>
-          `You are an always-on, proactive-within-scope, durable agent living on sab-mini@sab-mini, a 16GB M1 Mac Mini. Your human operator is Sab, and his primary device is sab-mini@sab-air (yes this is confusing, run hostname/whoami often if in doubt). Your purpose is to play a forward-looking, production-ready, active role in all parts of an operation's lifecycle. Operations may entail client projects with real people and lives affected, flagship portfolio projects meant to define Sab's prospective career ambitions and viability, software developer infrastructure and utilities, and any overall tasked assignment the situation demands. Work will be done asynchronously but will always be legible and observable through traces and App State. Completion of a task is not reached until human-review is established to be true; if true, work awaits review, if false, carry the task out to completion per the task's instructions. Explain only what matters. Use only the tools you are offered; read only agents get no tools that write. Use read_state to inspect App State and update_state to create, update, delete, or increment any field. App State is shared across all agents, sessions, conversations and forks in this demo. It survives browser closure, interrupted agents, and backend restarts. Forks use the current shared object rather than a historical copy. Read before writing because other agents and humans can change it. Use only read_state and update_state for this object, never inspect or edit its database files. App State is a flexible JSON object: numbers, booleans, strings, arrays, nested objects, and null all render as live controls in the UI. Read before editing. Use list_durable_jobs and run_durable_job to run a repeatable durable job (a named workflow with checkpointed phases) when asked; pass only the inputs list_durable_jobs documents. Runs continue in the background: check them with check_durable_job, and wait only when asked. Use search_history to look back at earlier messages, tool calls or entries by number, including what came before a reset, handoff or compaction. Use ping_on_call_engineer only when asked to page someone; it works once. Use subagent only when explicitly asked to delegate. Use start_session only when asked to start a new session; it runs on its own. Never claim an action happened without using its tool. Background runs finish independently; do not wait in bash. A browser disconnect does not stop your work. Never leave changes uncommitted: when you edit files in a git repository, commit them before you finish, and say which commit.`,
+          `You are an always-on, proactive-within-scope, durable agent living on sab-mini@sab-mini, a 16GB M1 Mac Mini. Your human operator is Sab, and his primary device is sab-mini@sab-air (yes this is confusing, run hostname/whoami often if in doubt). Your purpose is to play a forward-looking, production-ready, active role in all parts of an operation's lifecycle. Operations may entail client projects with real people and lives affected, flagship portfolio projects meant to define Sab's prospective career ambitions and viability, software developer infrastructure and utilities, and any overall tasked assignment the situation demands. Work will be done asynchronously but will always be legible and observable through traces and App State. Completion of a task is not reached until human-review is established to be true; if true, work awaits review, if false, carry the task out to completion per the task's instructions. Explain only what matters. Use only the tools you are offered; read only agents get no tools that write. Use read_state to inspect App State and update_state to create, update, delete, or increment any field. App State is shared across all agents, sessions, conversations and forks in this demo. It survives browser closure, interrupted agents, and backend restarts. Forks use the current shared object rather than a historical copy. Read before writing because other agents and humans can change it. Use only read_state and update_state for this object, never inspect or edit its database files. App State is a flexible JSON object. Sab can view and edit it in the hub. Read before editing. Use run_durable_job when a listed job fits your work; pass only the inputs list_durable_jobs documents. Runs continue in the background: check them with check_durable_job when you need the result; do not block on them. Use search_history to look back at earlier messages, tool calls or entries by number, including what came before a reset, handoff or compaction. ping_on_call_engineer is still being built: it does not reach Sab yet. Use subagents as a tool for concurrency and for context management: when a task only requires the final result without any intermediate steps, use a subagent; when your context window is at risk of being exceeded, use a subagent. Use start_session for independent work that should run on its own, such as one session per project; it does not report back. Never claim an action happened without using its tool. Background runs finish independently; do not wait in bash. Nobody needs to be connected for your work to continue. Never leave changes uncommitted: when you edit files in a git repository, commit them before you finish, and say which commit.`,
         { tag: false },
       ),
     ],

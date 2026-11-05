@@ -128,12 +128,12 @@ test("REST v1: auth, sessions, agents, messages, waits, idempotency, errors", as
     assert.ok(searched, "search_history result");
     assert.match(JSON.stringify(searched!.model), /run_durable_job/);
 
-    // ping_on_call_engineer pages once per agent.
+    // ping_on_call_engineer has no channel yet: every call says it was NOT delivered.
     assert.equal((await main.send("page: checkout is failing", "followUp", "page-1", 20000)).status, "done");
     await main.send("page: again", "followUp", "page-2", 20000);
     const pages = (await main.entries({ scope: "all" })).items.filter((e) => e.kind === "pi.tool-result" && JSON.stringify(e.model).includes("ping_on_call_engineer"));
     assert.equal(pages.length, 2);
-    assert.match(JSON.stringify(pages.find((e) => e.id === Math.max(...pages.map((p) => p.id)))!.model), /works once per agent/);
+    assert.match(JSON.stringify(pages.find((e) => e.id === Math.max(...pages.map((p) => p.id)))!.model), /NOT delivered/);
 
     // Compaction thresholds per session.
     const compaction = await client.request<{ reserveTokens: number }>("PATCH", `/v1/sessions/${s1.id}/compaction`, { reserveTokens: 20000 });
