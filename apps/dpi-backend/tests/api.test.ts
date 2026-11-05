@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
 import type { JobRunsDoc } from "../../dpi-sdk/src/jobs.js";
 import { DpiClient } from "../../dpi-sdk/src/client.js";
 import { DpiError } from "../../dpi-sdk/src/errors.js";
@@ -9,6 +10,10 @@ import { bootServer, faux, newToken, tempStore, until } from "./helpers.js";
 test("REST v1: auth, sessions, agents, messages, waits, idempotency, errors", async () => {
   const t = await tempStore();
   const token = newToken();
+  // Fake pager: logs its args and stdin, prints a session id like dpi-page does.
+  const pager = join(t.root, "fake-pager");
+  await writeFile(pager, `#!/bin/sh\n{ echo "$@"; cat; echo; } >> ${JSON.stringify(join(t.root, "pager.log"))}\necho fake-sid\n`, { mode: 0o755 });
+  process.env.DPI_PAGER = pager;
   const server = await bootServer({ home: join(t.root, "home"), startDirs: t.work, token, name: "api-box" });
   try {
     // Auth: healthz is open, /v1 needs the token in Authorization or X-DPI-Token.
@@ -128,12 +133,13 @@ test("REST v1: auth, sessions, agents, messages, waits, idempotency, errors", as
     assert.ok(searched, "search_history result");
     assert.match(JSON.stringify(searched!.model), /run_durable_job/);
 
-    // ping_on_call_engineer has no channel yet: every call says it was NOT delivered.
+    // ping_on_call_engineer runs the pager command (DPI_PAGER, a fake here) and reports delivery honestly.
     assert.equal((await main.send("page: checkout is failing", "followUp", "page-1", 20000)).status, "done");
     await main.send("page: again", "followUp", "page-2", 20000);
     const pages = (await main.entries({ scope: "all" })).items.filter((e) => e.kind === "pi.tool-result" && JSON.stringify(e.model).includes("ping_on_call_engineer"));
     assert.equal(pages.length, 2);
-    assert.match(JSON.stringify(pages.find((e) => e.id === Math.max(...pages.map((p) => p.id)))!.model), /NOT delivered/);
+    for (const p of pages) assert.match(JSON.stringify(p.model), /Delivered PG-\d+ \(high\) to Sab's phone as Hermes session fake-sid/);
+    assert.match(await readFile(join(t.root, "pager.log"), "utf8"), /--severity high --from .*session .*\ncheckout is failing/);
 
     // Compaction thresholds per session.
     const compaction = await client.request<{ reserveTokens: number }>("PATCH", `/v1/sessions/${s1.id}/compaction`, { reserveTokens: 20000 });

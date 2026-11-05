@@ -1,8 +1,8 @@
 import type { SharedState } from "./shared-state.js";
 import { Type } from "@earendil-works/pi-ai";
 import { isAbsolute, resolve, join } from "node:path";
-import { homedir, tmpdir } from "node:os";
-import { execFile } from "node:child_process";
+import { homedir, hostname, tmpdir } from "node:os";
+import { execFile, spawn as spawnProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, rm, stat } from "node:fs/promises";
 import { readState, type AppState } from "../../dpi-sdk/src/app-state.js";
@@ -38,7 +38,7 @@ const Receipt = defineDoc<{ applied: boolean; result: string }>({
   scope: "task",
   initial: () => ({ applied: false, result: "" }),
 });
-/** ping_on_call_engineer pages once per agent; this records the page. */
+/** The last page ping_on_call_engineer sent from this conversation. */
 const Pager = defineDoc<{ paged: boolean; at: number; page: string; summary: string }>({
   kind: "demo.pager",
   version: 1,
@@ -105,6 +105,31 @@ export type SpawnSession = (input: {
 }) => Promise<{ session: SessionSummary; submissionId?: number }>;
 
 export type ValidateModel = (model: { provider: string; modelId: string }) => { provider: string; modelId: string };
+
+/**
+ * Sends a page through dpi-page on pi-big (Hermes relays it verbatim; hermex-push puts it on Sab's phone).
+ * DPI_PAGER overrides the command (tests); it gets the same --severity/--from args and the message on stdin.
+ */
+function sendPage(severity: string, from: string, message: string): Promise<{ ok: boolean; detail: string }> {
+  const q = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
+  const [cmd, argv] = process.env.DPI_PAGER
+    ? [process.env.DPI_PAGER, ["--severity", severity, "--from", from]]
+    : ["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "big", `dpi-page --severity ${q(severity)} --from ${q(from)}`]];
+  return new Promise((done) => {
+    const child = spawnProcess(cmd, argv, { stdio: ["pipe", "pipe", "pipe"], timeout: 180_000 });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => done({ ok: false, detail: e.message }));
+    child.on("close", (code, signal) => {
+      const sid = out.trim().split("\n").pop() ?? "";
+      if (code === 0 && sid) done({ ok: true, detail: sid });
+      else done({ ok: false, detail: `${cmd} exited ${signal ?? code}: ${(err || out).trim().slice(-400)}` });
+    });
+    child.stdin.end(message);
+  });
+}
 
 export function createPlayground(
   shared: SharedState,
@@ -370,9 +395,9 @@ export function createPlayground(
   const pingOnCall = defineTool({
     name: "ping_on_call_engineer",
     description:
-      "Not built yet: records a page for Sab but sends it nowhere, so he is not reached. Being wired to a real channel.",
+      "Page Sab on his phone when something needs his decision or is broken and you cannot proceed. Your summary is relayed verbatim through Hermes to the Hermex app; the result says whether it was delivered.",
     parameters: Type.Object({
-      summary: Type.String({ description: "What the engineer needs to know, one or two sentences." }),
+      summary: Type.String({ description: "What Sab needs to know and what you need from him, in a few sentences." }),
       severity: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("high"), Type.Literal("critical")])),
     }),
     execute: async (args, api, ctx) => {
@@ -382,15 +407,13 @@ export function createPlayground(
         const pager = await tx.doc(Pager, api.conversationId);
         Object.assign(pager, { paged: true, at: Date.now(), page, summary: args.summary.slice(0, 300) });
       }, ctx);
-      api.output(`Recorded ${page} (${severity}). Not delivered: the pager has no channel yet.\n`);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `NOT delivered: recorded ${page} (${severity}), but ping_on_call_engineer has no real channel yet, so Sab was not reached and nobody acknowledged.`,
-          },
-        ],
-      };
+      const from = `${hostname()} session ${sessionId}, conversation ${api.conversationId}, ${page}`;
+      const sent = await sendPage(severity, from, args.summary);
+      const text = sent.ok
+        ? `Delivered ${page} (${severity}) to Sab's phone as Hermes session ${sent.detail}. He has not necessarily read it yet.`
+        : `NOT delivered: ${page} (${severity}) failed to reach Sab: ${sent.detail}`;
+      api.output(`${text}\n`);
+      return { content: [{ type: "text", text }] };
     },
   });
   const subagent = defineTool({
@@ -579,7 +602,7 @@ export function createPlayground(
       section(
         "playground",
         () =>
-          `You are an always-on, proactive-within-scope, durable agent living on sab-mini@sab-mini, a 16GB M1 Mac Mini. Your human operator is Sab, and his primary device is sab-mini@sab-air (yes this is confusing, run hostname/whoami often if in doubt). Your purpose is to play a forward-looking, production-ready, active role in all parts of an operation's lifecycle. Operations may entail client projects with real people and lives affected, flagship portfolio projects meant to define Sab's prospective career ambitions and viability, software developer infrastructure and utilities, and any overall tasked assignment the situation demands. Work will be done asynchronously but will always be legible and observable through traces and App State. Completion of a task is not reached until human-review is established to be true; if true, work awaits review, if false, carry the task out to completion per the task's instructions. Explain only what matters. Use only the tools you are offered; read only agents get no tools that write. Use read_state to inspect App State and update_state to create, update, delete, or increment any field. App State is shared across all agents, sessions, conversations and forks in this demo. It survives browser closure, interrupted agents, and backend restarts. Forks use the current shared object rather than a historical copy. Read before writing because other agents and humans can change it. Use only read_state and update_state for this object, never inspect or edit its database files. App State is a flexible JSON object. Sab can view and edit it in the hub. Read before editing. Use run_durable_job when a listed job fits your work; pass only the inputs list_durable_jobs documents. Runs continue in the background: check them with check_durable_job when you need the result; do not block on them. Use search_history to look back at earlier messages, tool calls or entries by number, including what came before a reset, handoff or compaction. ping_on_call_engineer is still being built: it does not reach Sab yet. Use subagents as a tool for concurrency and for context management: when a task only requires the final result without any intermediate steps, use a subagent; when your context window is at risk of being exceeded, use a subagent. Use start_session for independent work that should run on its own, such as one session per project; it does not report back. Never claim an action happened without using its tool. Background runs finish independently; do not wait in bash. Nobody needs to be connected for your work to continue. Never leave changes uncommitted: when you edit files in a git repository, commit them before you finish, and say which commit.`,
+          `You are an always-on, proactive-within-scope, durable agent living on sab-mini@sab-mini, a 16GB M1 Mac Mini. Your human operator is Sab, and his primary device is sab-mini@sab-air (yes this is confusing, run hostname/whoami often if in doubt). Your purpose is to play a forward-looking, production-ready, active role in all parts of an operation's lifecycle. Operations may entail client projects with real people and lives affected, flagship portfolio projects meant to define Sab's prospective career ambitions and viability, software developer infrastructure and utilities, and any overall tasked assignment the situation demands. Work will be done asynchronously but will always be legible and observable through traces and App State. Completion of a task is not reached until human-review is established to be true; if true, work awaits review, if false, carry the task out to completion per the task's instructions. Explain only what matters. Use only the tools you are offered; read only agents get no tools that write. Use read_state to inspect App State and update_state to create, update, delete, or increment any field. App State is shared across all agents, sessions, conversations and forks in this demo. It survives browser closure, interrupted agents, and backend restarts. Forks use the current shared object rather than a historical copy. Read before writing because other agents and humans can change it. Use only read_state and update_state for this object, never inspect or edit its database files. App State is a flexible JSON object. Sab can view and edit it in the hub. Read before editing. Use run_durable_job when a listed job fits your work; pass only the inputs list_durable_jobs documents. Runs continue in the background: check them with check_durable_job when you need the result; do not block on them. Use search_history to look back at earlier messages, tool calls or entries by number, including what came before a reset, handoff or compaction. Use ping_on_call_engineer to reach Sab when something needs his decision or is broken and you cannot proceed; it sends your summary to his phone verbatim. Use subagents as a tool for concurrency and for context management: when a task only requires the final result without any intermediate steps, use a subagent; when your context window is at risk of being exceeded, use a subagent. Use start_session for independent work that should run on its own, such as one session per project; it does not report back. Never claim an action happened without using its tool. Background runs finish independently; do not wait in bash. Nobody needs to be connected for your work to continue. Never leave changes uncommitted: when you edit files in a git repository, commit them before you finish, and say which commit.`,
         { tag: false },
       ),
     ],
