@@ -40,7 +40,7 @@ The contract every Durable Agent Network client uses: the web hub, `dpi-tui`, sc
 | `POST .../agents/:a/abort` | `{background?}` | stops foreground work (and background with `true`) |
 | `POST .../agents/:a/fork` | `{entryId, name?}` | `201 AgentSummary` |
 | `GET / PATCH .../agents/:a/config` | `{model?, thinkingLevel?, instructions?, cwd?, readOnly?}` | config; applies from the next request. `readOnly` filters the agent's tools to the ones that only read |
-| `GET / PATCH .../agents/:a/extensions` | PATCH `{name, enabled}` or `{prompt, enabled}` | `{extensions, builtIn}`: the custom extensions `system-prompts` (a checklist of the prompts in `prompts/`) and `jev-damage-control` (Jev judges each bash command and blocks destructive ones; the command goes to the Jev API, and a Jev error lets it run). Both are off by default. A change applies from the agent's next request |
+| `GET / PATCH .../agents/:a/extensions` | PATCH `{name, enabled}` or `{prompt, enabled}` | `{extensions, builtIn}`: the custom extensions `system-prompts` (a checklist of the prompts in `prompts/`), `jev-damage-control` (Jev judges each bash command and blocks destructive ones; the command goes to the Jev API, and a Jev error lets it run) and `codemode` (see [Code mode](#code-mode)). All are off by default. A change applies from the agent's next request |
 | `POST .../agents/:a/compact` | `{instructions?}` | `{taskId}` |
 | `POST .../agents/:a/reset` | `{note?}` | `{ok}` |
 | `GET .../agents/:a/docs/:kind` | `demo.job-runs` | `{kind, value}` |
@@ -51,6 +51,14 @@ The contract every Durable Agent Network client uses: the web hub, `dpi-tui`, sc
 ## Agent tools
 
 Every agent gets the coding tools `read`, `write`, `edit` and `bash`, plus the playground tools `read_state`, `update_state`, `list_durable_jobs`, `run_durable_job`, `check_durable_job`, `search_history`, `ping_on_call_engineer`, `subagent`, `start_session` and `handoff`. `readOnly` removes the eight that write: `bash`, `write`, `edit`, `update_state`, `run_durable_job`, `ping_on_call_engineer`, `subagent` and `start_session`. `GET .../agents/:a` lists each tool with its replay policy and whether it is offered.
+
+### Code mode
+
+Turning the `codemode` extension on adds the `codemode` tool (the model writes JavaScript that calls tools as `await tools.<name>(args)` in a QuickJS sandbox; a script survives a restart and resumes without re-running finished calls) and narrows what the model is offered to `codemode`, `bash` and `handoff`. The other twelve tools stay enabled but are reachable only from inside a script; `GET .../agents/:a` shows them with `offered: false`, and `readOnly` keeps its own meaning (it is not read only). Turning it off restores the fifteen. `handoff` and `codemode` itself are never callable from a script.
+
+- **Subagents from scripts.** `tools.subagent({ task })` works, at most 8 per script at once (further calls wait for a slot; model-issued `subagent` calls are not capped). A child made this way inherits code mode but has no `subagent` tool, so its scripts cannot spawn grandchildren.
+- **Continue and mark.** A replay-unsafe nested call (`bash`, `ping_on_call_engineer`) that a restart catches in flight does not reject in the script: it resolves as `{ interrupted: true, output, error }` and the script continues. Every model-issued script is rewritten for this on its first line (an `// @options:` line stays first), so user line numbers in error stacks are unchanged. The codemode result's text ends with a trailer naming such calls (`N call(s) were interrupted by a restart ...: c<id> <name> <args>`), and their `details.calls` rows have `status: "error"` with the interrupted text.
+- **Prompt.** While on, the system prompt gains a short section stating the above, after pi-durable's own `codemode` section that lists the script-callable tools.
 
 ## Durable jobs
 
@@ -78,12 +86,12 @@ data: {"type":"batch","events":[{"type":"message_update", ...}]}
 |---|---|
 | device `/v1/events` | `tree {tree}` (deduped, coalesced 250ms), `activity {items:[{type:"agent.started"\|"agent.finished", sessionId, agentId, at, preview?}]}`, `doc {kind, value, revision}` |
 | session `/v1/sessions/:s/events` | `session {agents, tasks, usage}`, then `agents`, `tasks`, `usage` |
-| agent `.../agents/:a/events` | `snapshot {snapshot, inbox}`, `batch {events}` (pi-durable `watchEvents()` verbatim), `inbox {items}` (queued content), `doc {kind, value}` |
+| agent `.../agents/:a/events` | `snapshot {snapshot, inbox}`, `batch {events}` (pi-durable `watchEvents()` verbatim), `inbox {items}` (queued content), `script {toolCallId, taskId, startedAt, endedAt?, calls}` (a running codemode script's nested calls, coalesced 150ms, sent when changed; the frame with `endedAt` is final), `doc {kind, value}` |
 | all | `hello {apiVersion, scope, serverTime}` |
 
 The hub's multiplexed stream (`/api/stream`) carries these frames per subscription and adds `stream {streamId}`, `network {devices}`, `fault {error}` and `disconnected {reason}`.
 
-To render a transcript from the agent stream in JS, feed frames to `AgentModel` from the SDK. It handles text/thinking/tool-call deltas, tool output windows, results, resets and overflow snapshots.
+To render a transcript from the agent stream in JS, feed frames to `AgentModel` from the SDK. It handles text/thinking/tool-call deltas, tool output windows, results, resets and overflow snapshots. A codemode call's `ToolCallView.calls` lists the script's `tools.<name>()` calls (`{id, taskId?, name, args, status: running|ok|error|interrupted|cancelled, startedAt?, endedAt?, durationMs?, error?}`): from `script` frames while it runs, from the result's `details.calls` once it settled. Nested calls also appear in `batch` as tool events with `parentToolCallId`; the model does not list them as tools of their own. Aborting the agent (`POST .../abort`) cascades to the script's nested tasks.
 
 ## Recipes
 

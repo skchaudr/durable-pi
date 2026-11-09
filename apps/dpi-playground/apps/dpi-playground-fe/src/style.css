@@ -1270,6 +1270,80 @@ svg {
 .tool-section-label .fork-button {
   margin-left: auto;
 }
+/* A codemode call: the script's nested calls under it, as a list in the tool card's own colors. */
+.script-progress {
+  flex: none;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 15px;
+  color: var(--secondary);
+}
+.tool-section-label .script-progress {
+  margin-left: auto;
+}
+.script-source {
+  border-top: 1px solid #412b2d;
+}
+.script-source summary {
+  padding: 8px 12px;
+  color: var(--secondary);
+}
+.script-source summary:after {
+  content: "+";
+}
+.script-source[open] summary:after {
+  content: "−";
+}
+.script-calls {
+  list-style: none;
+  margin: 0;
+  padding: 2px 12px 10px;
+  display: grid;
+  gap: 5px;
+}
+.script-call-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+.script-call-line code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: #2c1e20;
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: #f2eeee;
+}
+.script-call-state {
+  margin-left: auto;
+  flex: none;
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--secondary);
+}
+.script-calls .st-running svg {
+  color: var(--accent);
+}
+.script-calls .st-ok svg {
+  color: #6fcf97;
+}
+.script-calls .st-error svg,
+.script-calls .st-interrupted svg {
+  color: #ff8997;
+}
+.script-calls .st-cancelled {
+  opacity: 0.6;
+}
+.script-call-error {
+  margin: 4px 0 2px 24px;
+  color: #f2b8bf;
+  overflow-wrap: anywhere;
+}
+.script-empty {
+  padding: 2px 12px 10px;
+  color: var(--secondary);
+}
 .thinking {
   font-size: 16px;
   color: #f2eeee;

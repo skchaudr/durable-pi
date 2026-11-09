@@ -2,11 +2,20 @@
 // device (tree + activity), session (agents, tasks, usage) and agent (pi-durable agent events).
 // Streams are viewers only: closing one never aborts work or closes a harness.
 import type { Request, Response } from "express";
-import { watchEvents, type Conversation, type Harness } from "@earendil-works/pi-durable";
+import { watchEvents, type Conversation, type Harness, type TaskId } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import type { Activity, DeviceTree, Frame, StreamScope } from "../../dpi-sdk/src/api.js";
+import type {
+  Activity,
+  DeviceTree,
+  Frame,
+  ScriptView,
+  StreamScope,
+  WireAgentEvent,
+  WireSnapshotEvent,
+} from "../../dpi-sdk/src/api.js";
 import { AGENT_DOC_KINDS, DEVICE_DOC_KINDS, type SessionRow, type Store } from "./store.js";
 import { invalid } from "./errors.js";
+import { ScriptWatch } from "./script-watch.js";
 
 const MAX_BUFFER = 2_000_000;
 
@@ -199,26 +208,44 @@ export async function agentStream(
   const docs = parseDocs(req.query.docs, AGENT_DOC_KINDS);
   const stream = await watchEvents(h, c.id, ctx);
   const sse = openSse(res, { kind: "agent", sessionId: row.id, agentId: c.id as number });
-  sse.send({
-    type: "snapshot",
-    snapshot: JSON.parse(JSON.stringify(stream.snapshot)),
-    inbox: await store.inbox(h, c),
-  });
+  const snapshot: WireSnapshotEvent = JSON.parse(JSON.stringify(stream.snapshot));
+  sse.send({ type: "snapshot", snapshot, inbox: await store.inbox(h, c) });
+  // Codemode scripts: their nested calls arrive as tool events; frames go out per script, coalesced across a burst.
+  const scripts = new ScriptWatch();
+  const pending = new Map<string, ScriptView>();
+  const sendScript = (script: ScriptView) => sse.sendIfChanged(`script:${script.toolCallId}`, { type: "script", ...script });
+  const pushScripts = coalesce(async () => {
+    for (const script of pending.values()) sendScript(script);
+    pending.clear();
+  }, 150);
+  const queueScripts = (changed: ScriptView[]) => {
+    for (const script of changed) pending.set(script.toolCallId, script);
+    if (pending.size) pushScripts();
+  };
   const pushDocs = coalesce(async () => {
     for (const kind of docs)
       sse.sendIfChanged(`doc:${kind}`, { type: "doc", kind, value: await store.agentDoc(h, c, kind) });
   }, 150);
   await pushDocs.now();
+  // A script already running at attach (restart, late viewer) is rebuilt from the snapshot's open slots.
+  const startedAt = async (taskId: number) => (await h.getTask(taskId as TaskId, ctx))?.startedAt;
+  for (const script of await scripts.attach(snapshot, startedAt)) sendScript(script);
   stream.start(async (events) => {
     if (sse.closed) return;
-    sse.send({ type: "batch", events: JSON.parse(JSON.stringify(events)) });
+    const batch: readonly WireAgentEvent[] = JSON.parse(JSON.stringify(events));
+    sse.send({ type: "batch", events: batch });
     if (events.some((e) => e.type === "inbox_update" || e.type === "snapshot"))
       sse.send({ type: "inbox", items: await store.inbox(h, c) });
+    queueScripts(scripts.apply(batch));
+    // An overflow snapshot resets the viewer, so its scripts are sent again whether or not they changed.
+    for (const event of batch)
+      if (event.type === "snapshot") for (const script of await scripts.attach(event, startedAt)) sse.send({ type: "script", ...script });
   });
   const offDocs = docs.length ? h.subscribeCommits(() => pushDocs()) : () => {};
   sse.onClose(() => {
     offDocs();
     pushDocs.cancel();
+    pushScripts.cancel();
     void stream.stop();
   });
 }

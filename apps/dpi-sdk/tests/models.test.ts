@@ -132,6 +132,98 @@ test("a streamed turn: snapshot, deltas, tool output, results and dedupe", () =>
   assert.match(toMarkdown(model.state.items), /### You \(#1\)\n\nhi/);
 });
 
+test("codemode: script frames give the running call its nested calls; nested tool events never become transcript tools", () => {
+  const model = new AgentModel();
+  const code = "await tools.bash({ command: 'ls' })";
+  const turn: WireEntry = {
+    id: 2,
+    conversationId: 1,
+    kind: "pi.assistant",
+    model: [assistant([{ type: "toolCall", id: "cm1", name: "codemode", arguments: { code } }])],
+  };
+  model.apply({ type: "snapshot", snapshot: snapshot([user(1, "code:" + code)], { run: { inputs: [1] } }), inbox: [] });
+  model.apply({
+    type: "batch",
+    events: [
+      { type: "message_end", entry: turn },
+      { type: "tool_execution_start", toolCallId: "cm1", toolName: "codemode", taskId: 14, args: { code } },
+      { type: "tool_execution_start", toolCallId: "cm1/c1", toolName: "bash", taskId: 19, parentToolCallId: "cm1", parentTaskId: 14, args: { command: "ls" } },
+      { type: "tool_execution_update", toolCallId: "cm1/c1", toolName: "bash", taskId: 19, parentToolCallId: "cm1", parentTaskId: 14, output: { set: "a\n" } },
+    ],
+  });
+  const callOf = () => {
+    const item = model.state.items.find((i) => i.kind === "assistant");
+    return item?.kind === "assistant" && item.blocks[0].type === "tool" ? item.blocks[0].call : undefined;
+  };
+  assert.deepEqual(model.state.items.map((i) => i.kind), ["user", "assistant"], "the nested bash call is not a live tool item");
+  assert.equal(callOf()?.status, "running");
+  assert.equal(callOf()?.calls, undefined);
+
+  model.apply({ type: "script", toolCallId: "cm1", taskId: 14, startedAt: 1000, calls: [{ id: 1, taskId: 19, name: "bash", args: '{"command":"ls"}', status: "running", startedAt: 1100 }] });
+  assert.equal(callOf()?.startedAt, 1000);
+  assert.deepEqual(callOf()?.calls, [{ id: 1, taskId: 19, name: "bash", args: '{"command":"ls"}', status: "running", startedAt: 1100 }]);
+
+  model.apply({
+    type: "script",
+    toolCallId: "cm1",
+    taskId: 14,
+    startedAt: 1000,
+    calls: [
+      { id: 1, taskId: 19, name: "bash", args: '{"command":"ls"}', status: "ok", startedAt: 1100, endedAt: 1700, durationMs: 600 },
+      { id: 2, taskId: 21, name: "bash", args: '{"command":"exit 3"}', status: "error", startedAt: 1710, endedAt: 1720, durationMs: 10, error: "Command exited with code 3" },
+      { id: 3, taskId: 23, name: "bash", args: '{"command":"sleep 9"}', status: "running", startedAt: 1730 },
+    ],
+  });
+  assert.deepEqual(callOf()?.calls?.map((c) => [c.id, c.status]), [[1, "ok"], [2, "error"], [3, "running"]]);
+  assert.equal(callOf()?.calls?.[1].error, "Command exited with code 3");
+
+  // Settled: the result's details are the record; the final frame's timing stays on the view.
+  const details = { calls: [
+    { id: 1, name: "bash", args: '{"command":"ls"}', status: "ok", durationMs: 600 },
+    { id: 2, name: "bash", args: '{"command":"exit 3"}', status: "error", durationMs: 10, error: "Command exited with code 3" },
+    { id: 3, name: "bash", args: '{"command":"sleep 9"}', status: "cancelled" },
+  ] };
+  model.apply({
+    type: "batch",
+    events: [
+      { type: "tool_execution_end", toolCallId: "cm1/c3", toolName: "bash", taskId: 23, parentToolCallId: "cm1", parentTaskId: 14 },
+      {
+        type: "tool_execution_end",
+        toolCallId: "cm1",
+        toolName: "codemode",
+        taskId: 14,
+        entry: {
+          id: 3,
+          conversationId: 1,
+          kind: "pi.tool-result",
+          model: [{ role: "toolResult", toolCallId: "cm1", toolName: "codemode", content: [{ type: "text", text: "Script completed" }], isError: false, details }],
+        },
+      },
+    ],
+  });
+  model.apply({ type: "script", toolCallId: "cm1", taskId: 14, startedAt: 1000, endedAt: 2000, calls: [] });
+  assert.equal(callOf()?.status, "done");
+  assert.equal(callOf()?.endedAt, 2000);
+  assert.deepEqual(callOf()?.calls?.map((c) => [c.id, c.status, c.durationMs]), [[1, "ok", 600], [2, "error", 10], [3, "cancelled", undefined]]);
+  assert.deepEqual(model.state.items.map((i) => i.kind), ["user", "assistant"]);
+
+  // An aborted script's result has no call list: the final frame's calls stay visible.
+  const aborted = new AgentModel();
+  aborted.apply({ type: "snapshot", snapshot: snapshot([user(1, "x"), turn]), inbox: [] });
+  aborted.apply({ type: "script", toolCallId: "cm1", calls: [{ id: 1, name: "bash", args: "{}", status: "interrupted", error: "Tool bash was aborted" }] });
+  aborted.apply({
+    type: "batch",
+    events: [{ type: "entry_appended", entry: { id: 3, conversationId: 1, kind: "pi.tool-result", model: [{ role: "toolResult", toolCallId: "cm1", toolName: "codemode", content: [{ type: "text", text: "Tool codemode was aborted" }], isError: true }] } }],
+  });
+  const view = aborted.state.items[1];
+  const abortedCall = view.kind === "assistant" && view.blocks[0].type === "tool" ? view.blocks[0].call : undefined;
+  assert.equal(abortedCall?.status, "error");
+  assert.deepEqual(abortedCall?.calls?.map((c) => c.status), ["interrupted"]);
+  // A snapshot (reconnect) drops kept scripts; the result alone has no calls.
+  aborted.apply({ type: "snapshot", snapshot: snapshot([user(1, "x"), turn]), inbox: [] });
+  assert.deepEqual(aborted.state.items.map((i) => i.kind), ["user", "assistant"]);
+});
+
 test("overflow snapshot inside a batch replaces state; inbox and docs frames apply", () => {
   const model = new AgentModel();
   model.apply({ type: "snapshot", snapshot: snapshot([user(1, "a"), user(2, "b")]), inbox: [] });

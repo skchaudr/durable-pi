@@ -50,6 +50,46 @@ const Pager = defineDoc<{ paged: boolean; at: number; page: string; summary: str
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** How many subagents one codemode script may run at once; further `tools.subagent()` calls wait for a slot. */
+export const MAX_SCRIPT_SUBAGENTS = 8;
+
+/**
+ * Process-local counting semaphores, one per `<conversation>:<script call>`. A restart resets them, which is fine: the
+ * subagent tool is replay-safe and reattaches to the child it already created, so a rerun never spawns a second one.
+ */
+const scriptSubagentSlots = new Map<string, { active: number; waiters: (() => void)[] }>();
+async function acquireScriptSubagentSlot(key: string, signal?: AbortSignal): Promise<() => void> {
+  let slots = scriptSubagentSlots.get(key);
+  if (!slots) scriptSubagentSlots.set(key, (slots = { active: 0, waiters: [] }));
+  if (slots.active >= MAX_SCRIPT_SUBAGENTS) {
+    const mine = slots;
+    await new Promise<void>((resolve, reject) => {
+      const wake = () => {
+        signal?.removeEventListener("abort", cancel);
+        resolve();
+      };
+      const cancel = () => {
+        const i = mine.waiters.indexOf(wake);
+        if (i >= 0) mine.waiters.splice(i, 1);
+        reject(signal?.reason ?? Error("aborted"));
+      };
+      if (signal?.aborted) return cancel();
+      signal?.addEventListener("abort", cancel, { once: true });
+      mine.waiters.push(wake);
+    });
+  }
+  slots.active++;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    slots.active--;
+    const next = slots.waiters.shift();
+    if (next) next();
+    else if (slots.active === 0) scriptSubagentSlots.delete(key);
+  };
+}
+
 /** One line per phase change, for the run_durable_job call's live output. */
 function progressLines(run: JobRun) {
   return run.phases.flatMap((phase, i) => {
@@ -147,7 +187,7 @@ export function createPlayground(
     execute: async (args) => {
       const { value } = await shared.snapshot();
       return {
-        content: [{ type: "text", text: JSON.stringify(readState(value, args.path ?? "")) }],
+        output: [{ type: "text", text: JSON.stringify(readState(value, args.path ?? "")) }],
       };
     },
   });
@@ -192,7 +232,7 @@ export function createPlayground(
         }
         return receipt.result;
       }, ctx);
-      return { content: [{ type: "text", text: value }] };
+      return { output: [{ type: "text", text: value }] };
     },
   });
   const recentRuns = async (api: Pick<ToolExecutionApi, "conversationId" | "snapshot">, ctx: Context) =>
@@ -206,7 +246,7 @@ export function createPlayground(
     execute: async (_args, api, ctx) => {
       const runs = await recentRuns(api, ctx);
       return {
-        content: [
+        output: [
           {
             type: "text",
             text: JSON.stringify(
@@ -277,7 +317,7 @@ export function createPlayground(
       if (!wait) {
         const run = await read();
         return {
-          content: [
+          output: [
             {
               type: "text",
               text: `Started ${def.title} run #${run?.run ?? "?"} as durable task #${taskId}. It runs in the background, shows live in the chat and saves its result to App State ${def.resultPath}. Check it with check_durable_job {"task_id":${taskId}}.`,
@@ -300,7 +340,7 @@ export function createPlayground(
       }
       const ok = run?.status === "completed";
       return {
-        content: [
+        output: [
           {
             type: "text",
             text: run
@@ -332,7 +372,7 @@ export function createPlayground(
             : undefined;
       if (args.task_id === undefined && args.job === undefined)
         return {
-          content: [
+          output: [
             {
               type: "text",
               text: JSON.stringify(
@@ -345,7 +385,7 @@ export function createPlayground(
         throw Error(
           `No run ${args.task_id !== undefined ? `with task id ${args.task_id}` : `of ${args.job}`} in this conversation. Runs: ${runs.map((r) => `${r.id} (${r.job} #${r.run})`).join(", ") || "none"}`,
         );
-      return { content: [{ type: "text", text: JSON.stringify(runReport(run, Date.now())) }] };
+      return { output: [{ type: "text", text: JSON.stringify(runReport(run, Date.now())) }] };
     },
   });
   const searchHistoryTool = defineTool({
@@ -388,7 +428,7 @@ export function createPlayground(
         activeFrom,
         lastReset: resets.length ? Math.max(...resets) : undefined,
       });
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      return { output: [{ type: "text", text: JSON.stringify(result) }] };
     },
   });
   // No replay policy: the default `unsafe` means a crash mid-call returns an interrupted result and never pages twice.
@@ -413,13 +453,13 @@ export function createPlayground(
         ? `Delivered ${page} (${severity}) to Sab's phone as Hermes session ${sent.detail}. He has not necessarily read it yet.`
         : `NOT delivered: ${page} (${severity}) failed to reach Sab: ${sent.detail}`;
       api.output(`${text}\n`);
-      return { content: [{ type: "text", text }] };
+      return { output: [{ type: "text", text }] };
     },
   });
   const subagent = defineTool({
     name: "subagent",
     description:
-      "Delegate a self-contained task to an owned child conversation. Parent interruption also interrupts the child.",
+      `Delegate a self-contained task to an owned child conversation. Parent interruption also interrupts the child. A codemode script runs at most ${MAX_SCRIPT_SUBAGENTS} subagents at once; further calls wait for a slot.`,
     parameters: Type.Object({
       task: Type.String(),
       model: Type.Optional(
@@ -458,38 +498,48 @@ export function createPlayground(
         : undefined;
       if (args.thinkingLevel && !thinkingLevel)
         throw Error(`Invalid thinkingLevel ${args.thinkingLevel}. Use one of: ${THINKING_LEVELS.join(", ")}`);
-      const id = await api.commit(async (tx) => {
-        const found = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
-        if (found) return found.id;
-        const child = await tx.createConversation({
-          ownership: { kind: "task", taskId: api.taskId },
-        });
-        await configure(tx, child.id, {
-          tools: { remove: [subagent] },
-          ...(model ? { model } : {}),
-          ...(thinkingLevel ? { thinkingLevel } : {}),
-        });
-        return child.id;
-      }, ctx);
-      await api.details({ conversationId: id }, ctx);
-      const child = await api.conversation(id, ctx);
-      if (!child) throw Error("Child missing");
-      const result = await (
-        await child.submit(
-          { type: "input", content: args.task, requestId: `child:${api.taskId}` },
-          ctx,
-        )
-      ).wait(ctx);
-      const answer =
-        result.status === "done" && result.type === "input"
-          ? await api.commit((tx) => tx.entry(AssistantEntry, result.answer), ctx)
-          : undefined;
-      return {
-        content: [
-          { type: "text", text: answer ? JSON.stringify(answer.model) : JSON.stringify(result) },
-        ],
-        details: { conversationId: id },
-      };
+      // A nested call (`<script call id>/c<n>`) takes one of its script's slots; model-issued calls are not capped.
+      const slash = api.callId.lastIndexOf("/");
+      const release =
+        slash > 0
+          ? await acquireScriptSubagentSlot(`${api.conversationId}:${api.callId.slice(0, slash)}`, ctx.abortSignal)
+          : () => {};
+      try {
+        const id = await api.commit(async (tx) => {
+          const found = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
+          if (found) return found.id;
+          const child = await tx.createConversation({
+            ownership: { kind: "task", taskId: api.taskId },
+          });
+          await configure(tx, child.id, {
+            tools: { remove: [subagent] },
+            ...(model ? { model } : {}),
+            ...(thinkingLevel ? { thinkingLevel } : {}),
+          });
+          return child.id;
+        }, ctx);
+        await api.details({ conversationId: id }, ctx);
+        const child = await api.conversation(id, ctx);
+        if (!child) throw Error("Child missing");
+        const result = await (
+          await child.submit(
+            { type: "input", content: args.task, requestId: `child:${api.taskId}` },
+            ctx,
+          )
+        ).wait(ctx);
+        const answer =
+          result.status === "done" && result.type === "input"
+            ? await api.commit((tx) => tx.entry(AssistantEntry, result.answer), ctx)
+            : undefined;
+        return {
+          output: [
+            { type: "text", text: answer ? JSON.stringify(answer.model) : JSON.stringify(result) },
+          ],
+          details: { conversationId: id },
+        };
+      } finally {
+        release();
+      }
     },
   });
   const startSession = defineTool({
@@ -527,7 +577,7 @@ export function createPlayground(
           ? "It has no prompt yet."
           : `Sent its first message as submission #${submissionId}. It runs on its own.`;
       return {
-        content: [
+        output: [
           {
             type: "text",
             text: `Started session "${session.name}" (${session.id}) in ${session.cwd} with ${session.model}. ${sent}`,
@@ -562,7 +612,7 @@ export function createPlayground(
         });
         const data = (await readFile(out)).toString("base64");
         return {
-          content: [
+          output: [
             { type: "text", text: `${file} (${Math.round(info.size / 1024)} KB, sent as JPEG, longest side <= ${max}px)` },
             { type: "image", data, mimeType: "image/jpeg" },
           ],
@@ -574,11 +624,12 @@ export function createPlayground(
   });
   const handoff = defineTool({
     name: "handoff",
+    callers: ["model"],
     description:
       "Start a fresh model context with a concise handoff note. Old transcript stays stored.",
     parameters: Type.Object({ note: Type.String() }),
     execute: async (args) => ({
-      content: [{ type: "text", text: "Context handed off." }],
+      output: [{ type: "text", text: "Context handed off." }],
       control: { handoff: args.note },
     }),
   });

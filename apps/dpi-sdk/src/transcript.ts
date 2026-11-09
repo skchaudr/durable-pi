@@ -2,6 +2,8 @@
 // The web UI, the TUI and the backend's /transcript endpoint all use this, so every
 // interface stitches tool calls, results and live output the same way.
 import type {
+  ScriptCall,
+  ScriptView,
   WireAssistantMessage,
   WireEntry,
   WireMessage,
@@ -23,6 +25,24 @@ export interface ToolCallView {
   /** Result text once the result entry exists. */
   result?: string;
   resultEntryId?: number;
+  /** A codemode call's nested calls: live from the stream while running, from the result's details once settled. */
+  calls?: ScriptCall[];
+  startedAt?: number;
+  endedAt?: number;
+}
+
+/** The codemode result's `details.calls` as the stream's live shape, so a renderer sees one list either way. */
+export function callsOf(details: unknown): ScriptCall[] | undefined {
+  const calls = (details as { calls?: unknown } | undefined)?.calls;
+  if (!Array.isArray(calls)) return undefined;
+  return calls.map((c: Partial<ScriptCall> & { id: number; name: string }) => ({
+    id: c.id,
+    name: c.name,
+    args: typeof c.args === "string" ? c.args : JSON.stringify(c.args ?? {}),
+    status: c.status ?? "ok",
+    ...(c.durationMs !== undefined ? { durationMs: c.durationMs } : {}),
+    ...(c.error !== undefined ? { error: c.error } : {}),
+  }));
 }
 
 export type AssistantBlockView =
@@ -82,6 +102,7 @@ export function toTranscript(
   entries: readonly WireEntry[],
   live?: WireAssistantMessage,
   tools: ReadonlyMap<string, LiveTool> = new Map(),
+  scripts: ReadonlyMap<string, ScriptView> = new Map(),
 ): TranscriptItem[] {
   const results = new Map<string, { entryId: number; message: WireToolResultMessage }>();
   const callIds = new Set<string>();
@@ -98,7 +119,11 @@ export function toTranscript(
   const toolView = (id: string, name: string, args: unknown): ToolCallView => {
     const result = results.get(id);
     const running = tools.get(id);
-    if (result)
+    const script = scripts.get(id);
+    const span = script ? { ...(script.startedAt !== undefined ? { startedAt: script.startedAt } : {}), ...(script.endedAt !== undefined ? { endedAt: script.endedAt } : {}) } : {};
+    if (result) {
+      // An aborted script's result carries no call list; the stream's final frame still has it.
+      const calls = callsOf(result.message.details) ?? script?.calls;
       return {
         callId: id,
         name,
@@ -106,13 +131,18 @@ export function toTranscript(
         status: result.message.isError ? "error" : "done",
         result: messageText(result.message),
         resultEntryId: result.entryId,
+        ...(calls ? { calls } : {}),
+        ...span,
       };
+    }
     return {
       callId: id,
       name,
       args,
       status: running?.status === "running" ? "running" : "pending",
       output: running?.output || undefined,
+      ...(script ? { calls: script.calls } : {}),
+      ...span,
     };
   };
 

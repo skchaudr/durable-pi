@@ -1,15 +1,67 @@
 <script setup lang="ts">
-import { Activity, Braces, Check, GitFork, Info, Layers, Wrench } from "lucide-vue-next";
+import {
+  Activity,
+  Ban,
+  Braces,
+  Check,
+  GitFork,
+  Info,
+  Layers,
+  LoaderCircle,
+  Octagon,
+  Wrench,
+  X,
+} from "lucide-vue-next";
+import type { ScriptCall } from "@sdk/api";
 import type { TranscriptItem, ToolCallView } from "@sdk/transcript";
 import { markdown } from "../client/markdown";
 import { json } from "../client/store";
-import { runByCall, runById } from "../client/jobs";
+import { now, runByCall, runById, seconds } from "../client/jobs";
 import JobCard from "./JobCard.vue";
 
 defineProps<{ item: TranscriptItem }>();
 const emit = defineEmits<{ fork: [entryId: number] }>();
 const statusLabel = (call: ToolCallView) =>
   call.status === "error" ? "Error" : call.status === "done" ? "Done" : call.status;
+// A codemode call: its script is the argument worth previewing, and its nested calls render as a list.
+const isScript = (call: ToolCallView) => call.name === "codemode";
+const source = (call: ToolCallView) => String((call.args as { code?: unknown })?.code ?? "");
+const preview = (call: ToolCallView) =>
+  isScript(call)
+    ? source(call).trim().replace(/\s+/g, " ").slice(0, 90)
+    : json(call.args)?.slice(0, 90);
+const callIcon = {
+  running: LoaderCircle,
+  ok: Check,
+  error: X,
+  interrupted: Octagon,
+  cancelled: Ban,
+} as const;
+const callState = (c: ScriptCall) =>
+  c.status === "running"
+    ? c.startedAt
+      ? seconds(now.value - c.startedAt)
+      : "running"
+    : c.status === "ok"
+      ? c.durationMs !== undefined
+        ? seconds(c.durationMs)
+        : "ok"
+      : c.status;
+/** "3 calls, 1 running · 4.2s" while the script runs; "3 calls · 4.2s" once it settled. */
+const progress = (call: ToolCallView) => {
+  const calls = call.calls ?? [];
+  const running = calls.filter((c) => c.status === "running").length;
+  const parts = [
+    `${calls.length} call${calls.length === 1 ? "" : "s"}${running ? `, ${running} running` : ""}`,
+  ];
+  if (call.startedAt)
+    parts.push(
+      seconds(
+        (call.endedAt ?? (call.status === "running" ? now.value : call.startedAt)) - call.startedAt,
+      ),
+    );
+  return parts.join(" · ");
+};
 const entryClass = (item: TranscriptItem) =>
   item.kind === "user"
     ? "pi-user"
@@ -64,11 +116,46 @@ const entryClass = (item: TranscriptItem) =>
             <Check v-else-if="b.call.status === 'done'" :size="18" />
             <Activity v-else-if="b.call.status === 'running'" :size="18" />
             <Wrench v-else :size="18" /><strong>{{ b.call.name }}</strong
-            ><code>{{ json(b.call.args)?.slice(0, 90) }}</code>
+            ><code>{{ preview(b.call) }}</code>
+            <span v-if="isScript(b.call) && b.call.calls" class="script-progress">{{
+              progress(b.call)
+            }}</span>
             <span class="tool-status">{{ statusLabel(b.call) }}</span>
           </summary>
-          <div class="tool-section-label">Input</div>
-          <pre>{{ json(b.call.args) }}</pre>
+          <template v-if="isScript(b.call)">
+            <details class="script-source">
+              <summary>Script</summary>
+              <pre>{{ source(b.call) }}</pre>
+            </details>
+            <div v-if="b.call.calls" class="tool-section-label">
+              <span>Calls</span><span class="script-progress">{{ progress(b.call) }}</span>
+            </div>
+            <ol v-if="b.call.calls?.length" class="script-calls">
+              <li
+                v-for="c in b.call.calls"
+                :key="c.id"
+                :class="`st-${c.status}`"
+                :data-script-call="c.id"
+              >
+                <div class="script-call-line">
+                  <component
+                    :is="callIcon[c.status]"
+                    :size="15"
+                    :class="{ spin: c.status === 'running' }"
+                  />
+                  <strong>{{ c.name }}</strong
+                  ><code :title="c.args">{{ c.args }}</code>
+                  <span class="script-call-state">{{ callState(c) }}</span>
+                </div>
+                <div v-if="c.error" class="script-call-error">{{ c.error }}</div>
+              </li>
+            </ol>
+            <div v-else-if="b.call.calls" class="script-empty">No tool calls yet.</div>
+          </template>
+          <template v-else>
+            <div class="tool-section-label">Input</div>
+            <pre>{{ json(b.call.args) }}</pre>
+          </template>
           <template v-if="b.call.result !== undefined">
             <div class="tool-section-label">
               <span>Result</span>
@@ -92,8 +179,7 @@ const entryClass = (item: TranscriptItem) =>
         <JobCard
           v-if="b.type === 'tool' && b.call.name === 'run_durable_job' && runByCall(b.call.callId)"
           :run="runByCall(b.call.callId)!"
-        /></template
-      >
+      /></template>
       <div v-if="item.streaming && !item.blocks.length" class="typing"><i /><i /><i /></div>
       <div v-if="item.error" class="message-error">{{ item.error }}</div></template
     >
@@ -121,7 +207,10 @@ const entryClass = (item: TranscriptItem) =>
         ><span>{{ item.call.status }}</span>
       </div>
       <pre v-if="item.call.output">{{ item.call.output }}</pre>
-      <JobCard v-if="item.call.name === 'run_durable_job' && runByCall(item.call.callId)" :run="runByCall(item.call.callId)!" />
+      <JobCard
+        v-if="item.call.name === 'run_durable_job' && runByCall(item.call.callId)"
+        :run="runByCall(item.call.callId)!"
+      />
     </div>
     <JobCard
       v-else-if="item.entryKind === 'demo.job' && runById((item.data as { taskId: number }).taskId)"

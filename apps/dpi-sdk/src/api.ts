@@ -1,7 +1,7 @@
 // The Durable Agent Network wire contract: every JSON body and stream frame between
 // dpi-backend and its clients. Types only, so browsers, Node and the TUI share it.
 //
-// Agent events are pi-durable 1.0.3's `watchEvents()` output passed through verbatim.
+// Agent events are pi-durable 1.3.0's `watchEvents()` output passed through verbatim.
 // The Wire* event types below copy their JSON shape; apps/dpi-backend/src/contract-check.ts
 // fails the build if pi-durable's own types stop fitting them.
 
@@ -357,6 +357,27 @@ export interface WireToolSlot {
   entry?: number;
 }
 
+/** A call a running tool made through pi-durable's `executeTool()`: a codemode script's `tools.<name>()`. */
+export interface WireNestedToolSlot extends Omit<WireToolSlot, "taskId" | "entry"> {
+  parentCallId: string;
+  parentTaskId: number;
+  taskId: number;
+  arguments: unknown;
+  summary?: { isError: boolean; durationMs?: number; error?: string };
+}
+
+/**
+ * Which call a tool event is about. `toolCallId` is `<parent call id>/<key>` for a nested call, which also names the
+ * call that made it; `taskId` is absent for a call that never got a tool task.
+ */
+export interface WireToolEventCall {
+  toolCallId: string;
+  toolName: string;
+  taskId?: number;
+  parentToolCallId?: string;
+  parentTaskId?: number;
+}
+
 export interface WireCompaction {
   taskId: number;
   reason: string;
@@ -411,6 +432,8 @@ export interface WireSnapshotEvent {
     deferred?: { pollAt: number };
   };
   tools: readonly WireToolSlot[];
+  /** Nested calls of running tool calls, parents first; a call's are removed when it settles. */
+  nestedTools?: readonly WireNestedToolSlot[];
   compactions: readonly WireCompaction[];
   inbox: readonly WireQueued[];
   agent: WireAgentState;
@@ -424,16 +447,16 @@ export type WireAgentEvent =
   | { type: "message_start"; message: WireMessage }
   | { type: "message_update"; usage: WireUsage; changes: readonly WireMessageChange[] }
   | { type: "message_end"; entry: WireEntry }
-  | { type: "tool_execution_start"; toolCallId: string; toolName: string; args: unknown }
-  | {
+  | ({ type: "tool_execution_start"; args: unknown } & WireToolEventCall)
+  | ({
       type: "tool_execution_update";
-      toolCallId: string;
-      toolName: string;
       output?: { trimStart?: number; append?: string } | { set: string };
       details?: unknown;
       diagnostics?: readonly unknown[];
-    }
-  | { type: "tool_execution_end"; toolCallId: string; toolName: string; entry?: WireEntry }
+    } & WireToolEventCall)
+  // A model-issued call ends with its result `entry`, a nested call with its `result`; both absent when the task
+  // faulted, was orphaned, or its run or parent ended first.
+  | ({ type: "tool_execution_end"; entry?: WireEntry; result?: WireNestedResult } & WireToolEventCall)
   | { type: "inbox_update"; items: readonly WireQueued[] }
   | { type: "submission"; record: { id: number; status: string } }
   | { type: "auto_retry_start"; attempt: number; at: number; errorMessage: string }
@@ -445,6 +468,41 @@ export type WireAgentEvent =
   | { type: "task_failed"; taskId: number; kind: string; message: string }
   | { type: "compaction_start"; taskId: number; reason: string; blocking: boolean }
   | { type: "compaction_end"; taskId: number; reason: string };
+
+export interface WireNestedResult {
+  taskId: number;
+  isError: boolean;
+  structuredOutput?: unknown;
+  details?: unknown;
+  diagnostics?: readonly { severity: string; code?: string; message: string }[];
+  durationMs?: number;
+}
+
+/** One call of a codemode script: its `tools.<name>()` in issue order; `status` beyond running is how it ended. */
+export interface ScriptCall {
+  id: number;
+  taskId?: number;
+  name: string;
+  /** Compact JSON of the arguments, cut for display. */
+  args: string;
+  /** `cancelled`: still running when the script ended; `interrupted`: a restart or an abort ended it. */
+  status: "running" | "ok" | "error" | "interrupted" | "cancelled";
+  startedAt?: number;
+  endedAt?: number;
+  durationMs?: number;
+  /** Error text, cut for display. */
+  error?: string;
+}
+
+/** A codemode tool call seen from the agent stream: the script's nested calls, live until the call settles. */
+export interface ScriptView {
+  toolCallId: string;
+  taskId?: number;
+  startedAt?: number;
+  /** Set on the final frame, sent when the codemode call ends. */
+  endedAt?: number;
+  calls: ScriptCall[];
+}
 
 /** A queued submission with its content, read from the conversation's `pi.inbox` document. */
 export interface InboxItem {
@@ -504,6 +562,7 @@ export type Frame =
   | { type: "snapshot"; snapshot: WireSnapshotEvent; inbox: InboxItem[] }
   | { type: "batch"; events: readonly WireAgentEvent[] }
   | { type: "inbox"; items: InboxItem[] }
+  | ({ type: "script" } & ScriptView)
   // any scope that asked for documents
   | { type: "doc"; kind: string; value: unknown; revision?: number }
   // hub mux only

@@ -7,6 +7,8 @@
 //   "check:[ <task id>|<job id>]" → one check_durable_job call
 //   "search: <words>" → one search_history call
 //   "page: <summary>" → one ping_on_call_engineer call
+//   "code: <js>"   → one codemode call with <js> as the script
+//   "tools?"       → plain text: the names of the tools this request offers the model, comma separated
 //   "Release check: …" (the release-check job's subagent) → one bash call
 //   anything else  → "Echo: <text>"
 import type { MutableModels } from "@earendil-works/pi-ai/models";
@@ -17,6 +19,7 @@ import {
   fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai/providers/faux";
+import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 
 export const fauxModels = [{ id: "echo", name: "Faux Echo" }] as const;
 
@@ -54,6 +57,8 @@ export function installFaux(models: MutableModels) {
     }
     const call = (name: string, args: Parameters<typeof fauxToolCall>[1]) =>
       fauxAssistantMessage([fauxText(`Calling ${name}.`), fauxToolCall(name, args)], { stopReason: "toolUse" });
+    if (prompt === "tools?")
+      return fauxAssistantMessage(fauxText(getCurrentTools(messages as never).map((t) => t.name).join(", ")));
     if (prompt === "jobs?") return call("list_durable_jobs", {});
     if (prompt.startsWith("job:")) {
       const m = prompt.slice(4).trim().match(/^(\S+)\s*(\{.*\})?\s*(wait)?$/);
@@ -68,6 +73,7 @@ export function installFaux(models: MutableModels) {
       return call("check_durable_job", /^\d+$/.test(ref) ? { task_id: Number(ref) } : ref ? { job: ref } : {});
     }
     if (prompt.startsWith("search:")) return call("search_history", { query: prompt.slice(7).trim() });
+    if (prompt.startsWith("code:")) return call("codemode", { code: prompt.slice(5).trim() });
     if (prompt.startsWith("page:")) return call("ping_on_call_engineer", { summary: prompt.slice(5).trim() });
     if (prompt.startsWith("Release check:"))
       return call("bash", { command: "git log --oneline -5 2>/dev/null || echo 'no git history'; ls | head -5" });

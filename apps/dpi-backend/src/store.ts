@@ -70,7 +70,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { createPlayground, Workspace, type SpawnSession } from "./extensions.js";
 import { observeSession } from "./observe.js";
 import { createJobs, JobRuns, JOB_DEFS, jobDef, resolveJobInput, type Jobs } from "./jobs.js";
-import { ADDON_INFO, createAddons, PROMPTS, PromptChecklist, type Addons } from "./addons.js";
+import { ADDON_INFO, CODEMODE_MODEL_TOOLS, createAddons, PROMPTS, PromptChecklist, type Addons } from "./addons.js";
 import { JOB_RUNS_DOC } from "../../dpi-sdk/src/jobs.js";
 
 export const DURABLE_VERSION = "1.0.3";
@@ -1059,7 +1059,19 @@ export class Store {
       const rank = (name: string) => ADDON_INFO.findIndex((a) => a.name === name);
       const others = (await c.agent(ctx)).extensions.filter((e) => e.name !== extension.name);
       const next = (enabled ? [...others, extension] : others).sort((a, b) => rank(a.name) - rank(b.name));
-      await c.configure({ extensions: next }, ctx);
+      // Code mode narrows what the model is offered to the script tool and the two tools that make no sense inside a
+      // script; everything else stays enabled, so scripts can call it. `modelTools` never widens the callable set.
+      const modelTools =
+        extension.name !== "codemode"
+          ? undefined
+          : enabled
+            ? CODEMODE_MODEL_TOOLS.map((name) => {
+                const tool = next.flatMap((e) => e.tools ?? []).find((t) => t.name === name);
+                if (!tool) throw new ApiFault("unavailable", `Code mode needs the ${name} tool, which this agent lacks`);
+                return tool as ToolRegistration;
+              })
+            : null;
+      await c.configure({ extensions: next, ...(modelTools === undefined ? {} : { modelTools }) }, ctx);
     } else if (typeof body.prompt === "string") {
       const prompt = body.prompt;
       if (!PROMPTS.some((p) => p.id === prompt)) throw invalid(`Unknown prompt ${prompt}. Known: ${PROMPTS.map((p) => p.id).join(", ")}`);

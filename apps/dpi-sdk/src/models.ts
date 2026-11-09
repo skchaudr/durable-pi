@@ -6,6 +6,7 @@ import type {
   Frame,
   InboxItem,
   NetworkDevice,
+  ScriptView,
   SessionSummary,
   TaskNode,
   UsageTotals,
@@ -103,11 +104,16 @@ export function applyMessageChange(message: WireAssistantMessage, change: WireMe
   return { ...message, content };
 }
 
+/** Script views kept after their call ended, for results that carry no call list (an aborted script). */
+const SCRIPTS_KEPT = 20;
+
 export class AgentModel extends Emitter {
   state: AgentViewState = emptyAgentState();
   private entries = new Map<number, WireEntry>();
   private live?: WireAssistantMessage;
   private tools = new Map<string, LiveTool>();
+  /** Codemode scripts by tool call id: live frames from the stream, the final one kept until pruned. */
+  private scripts = new Map<string, ScriptView>();
 
   /** Apply one stream frame; returns true when state changed. */
   apply(frame: Frame): boolean {
@@ -125,6 +131,13 @@ export class AgentModel extends Emitter {
       case "doc":
         this.state.docs = { ...this.state.docs, [frame.kind]: frame.value };
         break;
+      case "script": {
+        const { type: _type, ...script } = frame;
+        this.scripts.delete(script.toolCallId);
+        this.scripts.set(script.toolCallId, script);
+        while (this.scripts.size > SCRIPTS_KEPT) this.scripts.delete(this.scripts.keys().next().value!);
+        break;
+      }
       default:
         return false;
     }
@@ -141,6 +154,7 @@ export class AgentModel extends Emitter {
   clear() {
     this.entries.clear();
     this.tools.clear();
+    this.scripts.clear();
     this.live = undefined;
     this.state = emptyAgentState();
     this.emit();
@@ -150,11 +164,13 @@ export class AgentModel extends Emitter {
     const entries = [...this.entries.values()].sort((a, b) => a.id - b.id);
     this.state.entries = entries;
     this.state.generating = !!this.live;
-    this.state.items = toTranscript(entries, this.live, this.tools);
+    this.state.items = toTranscript(entries, this.live, this.tools, this.scripts);
   }
 
   private reset(snapshot: WireSnapshotEvent) {
     this.entries = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
+    // The stream re-sends the scripts still running after a snapshot.
+    this.scripts.clear();
     this.live = snapshot.generation?.message ? structuredClone(snapshot.generation.message) : undefined;
     this.tools = new Map(
       snapshot.tools.map((slot) => [
@@ -212,7 +228,9 @@ export class AgentModel extends Emitter {
         return this.commit(event.entry);
       case "entry_appended":
         return this.commit(event.entry);
+      // Nested calls (a codemode script's) are not transcript tools: the stream's `script` frames carry them.
       case "tool_execution_start":
+        if (event.parentToolCallId !== undefined) return;
         this.tools.set(event.toolCallId, {
           name: event.toolName,
           status: "running",
@@ -221,6 +239,7 @@ export class AgentModel extends Emitter {
         });
         return;
       case "tool_execution_update": {
+        if (event.parentToolCallId !== undefined) return;
         const tool = this.tools.get(event.toolCallId) ?? {
           name: event.toolName,
           status: "running" as const,
@@ -234,6 +253,7 @@ export class AgentModel extends Emitter {
         return;
       }
       case "tool_execution_end":
+        if (event.parentToolCallId !== undefined) return;
         this.tools.delete(event.toolCallId);
         if (event.entry) this.entries.set(event.entry.id, event.entry);
         return;

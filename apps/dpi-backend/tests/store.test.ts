@@ -6,7 +6,15 @@ import { mkdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import type { Store } from "../src/store.js";
 import { JOB_RUNS_DOC, type JobRunsDoc } from "../../dpi-sdk/src/jobs.js";
-import { faux, tempStore, until } from "./helpers.js";
+import { delay, faux, tempStore, until } from "./helpers.js";
+import { CODEMODE_SCRIPT_TOOLS } from "../src/addons.js";
+import { MAX_SCRIPT_SUBAGENTS } from "../src/extensions.js";
+
+/** Every tool an agent has while code mode is off, as the faux model reports them to `tools?`. */
+const ALL_TOOL_NAMES = [
+  "bash", "check_durable_job", "edit", "handoff", "list_durable_jobs", "ping_on_call_engineer", "read", "read_state",
+  "run_durable_job", "search_history", "start_session", "subagent", "update_state", "view_image", "write",
+];
 
 const jobs = async (store: Store, session: string) => {
   const { h, c } = await store.resolveAgent(session, "main");
@@ -183,7 +191,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
       JSON.stringify((await store.entries(c, undefined, 500)).items.filter((e) => e.kind === "pi.system").slice(0, 1));
 
     let ext = await store.extensionsOf(row, c);
-    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false]]);
+    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false], ["codemode", false]]);
     assert.deepEqual(ext.builtIn.sort(), ["coding-tools", "playground"]);
     assert.deepEqual(ext.extensions[0].prompts?.map((p) => [p.id, p.enabled]), [["smart_ass_opus_fix.md", true], ["one_sentence.md", false]]);
 
@@ -210,13 +218,13 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
     assert.doesNotMatch(await systemText(), /Clear, Concise, Actionable Communication/);
     // Extensions stack: turning one on keeps the other on.
     ext = await store.setExtension(row, c, { name: "jev-damage-control", enabled: true });
-    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true]]);
+    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true], ["codemode", false]]);
     assert.deepEqual(ext.builtIn, ["coding-tools", "playground"]);
     await mkdir(join(t.work, "doomed"));
     await turn("!rm -rf doomed");
     assert.ok(existsSync(join(t.work, "doomed")));
     ext = await store.setExtension(row, c, { name: "system-prompts", enabled: false });
-    assert.deepEqual(ext.extensions.map((e) => e.enabled), [false, true]);
+    assert.deepEqual(ext.extensions.map((e) => e.enabled), [false, true, false]);
     await assert.rejects(() => store.setExtension(row, c, { name: "nope", enabled: true }), /Unknown extension/);
   } finally {
     await store.close();
@@ -252,6 +260,145 @@ test("read only: the agent is offered only tools that read; turning it off resto
     await store.configure(row, c, { readOnly: false });
     assert.ok((await offered()).includes("bash"));
     assert.equal((await store.agentDetail(row, c)).config.readOnly, false);
+  } finally {
+    await store.close();
+    await t.cleanup();
+  }
+});
+
+test("codemode: scripts call the agent's tools as nested calls; only the script output enters the transcript; jev gates nested bash; the model is offered codemode, bash and handoff only", async () => {
+  const t = await tempStore();
+  const store = await t.open();
+  try {
+    const session = await store.create({ name: "Code", cwd: t.work, model: faux });
+    const { row, h, c } = await store.resolveAgent(session.id, "main");
+    let n = 0;
+    const turn = async (content: string) => {
+      const submission = await store.send(c, { content, requestId: `code-${++n}` });
+      const settled = await store.settled(h, submission.id as number, 30000);
+      assert.equal(settled.status, "done");
+      return JSON.stringify((await store.entries(c, undefined, 12)).items);
+    };
+    const script = (code: string) => turn(`code:${code}`);
+    const offeredToModel = async () => {
+      const submission = await store.send(c, { content: "tools?", requestId: `code-${++n}` });
+      const settled = await store.settled(h, submission.id as number, 30000);
+      assert.equal(settled.status, "done");
+      return (settled.status === "done" ? settled.answer.text : "").split(",").map((x) => x.trim()).filter(Boolean).sort();
+    };
+
+    // Off by default: the faux model's codemode call is an unavailable tool, and the model is offered every tool.
+    assert.doesNotMatch(JSON.stringify((await store.agentDetail(row, c)).tools ?? ""), /"codemode"/);
+    const off = await script(`return 1`);
+    assert.match(off, /tool_unavailable|Unknown tool|not available/i);
+    assert.deepEqual(await offeredToModel(), ALL_TOOL_NAMES);
+
+    // On: the model gets codemode, bash and handoff; every other tool is enabled but only reachable from a script.
+    await store.setExtension(row, c, { name: "codemode", enabled: true });
+    assert.match(JSON.stringify((await store.agentDetail(row, c)).tools), /"codemode"/);
+    assert.deepEqual(await offeredToModel(), ["bash", "codemode", "handoff"]);
+    const detail = await store.agentDetail(row, c);
+    assert.deepEqual(detail.tools.filter((x) => x.offered).map((x) => x.name).sort(), ["bash", "codemode", "handoff"]);
+    assert.equal(detail.tools.length, 16, "every tool stays enabled; codemode is the 16th");
+    assert.equal(detail.config.readOnly, false, "withholding the write tools from the model is not read only: scripts still write");
+    const callable = await script(`return ALL_TOOLS.map((t) => t.name).sort().join(",")`);
+    const listed = callable.match(/Output:\\n([a-z_,]+)/)?.[1]?.split(",") ?? [];
+    assert.deepEqual(listed, [...CODEMODE_SCRIPT_TOOLS, "bash"].sort(), "scripts call the 12 script tools and bash");
+    const system = JSON.stringify((await store.entries(c, undefined, 500)).items.filter((e) => e.kind === "pi.system"));
+    assert.match(system, /Code mode is on\. Your direct tools are codemode, bash and handoff\./);
+
+    // Three bash calls and an App State read from one script: one tool call in the transcript, the script's output in it.
+    const out = await script(`
+      const names = ["a", "b", "c"];
+      const r = await Promise.all(names.map((f) => tools.bash({ command: "echo hi-" + f })));
+      const st = await tools.read_state({ path: "" });
+      text("state keys " + Object.keys(JSON.parse(st)).sort().join(","));
+      return r.map((x) => x.output.trim()).join("|");
+    `);
+    assert.match(out, /hi-a\|hi-b\|hi-c/);
+    assert.match(out, /state keys/);
+    const calls = (await store.entries(c, undefined, 100)).items.filter((e) => JSON.stringify(e).includes('"toolCall"'));
+    // Three codemode calls: the refused one from before the extension was on, the tool listing, and this one.
+    assert.equal(calls.filter((e) => JSON.stringify(e).includes('"codemode"')).length, 3);
+    assert.equal(calls.filter((e) => JSON.stringify(e).includes('"name":"bash"')).length, 0, "nested bash calls are not transcript entries");
+
+    // jev-damage-control hooks nested bash too.
+    await mkdir(join(t.work, "doomed"));
+    await store.setExtension(row, c, { name: "jev-damage-control", enabled: true });
+    const blocked = await script(`try { await tools.bash({ command: "rm -rf doomed" }); return "ran" } catch (e) { return "caught: " + e.message }`);
+    assert.ok(existsSync(join(t.work, "doomed")));
+    assert.match(blocked, /caught: .*jev-damage-control blocked/);
+
+    // A script cannot nest codemode or hand off; an unknown member still throws the sandbox's error.
+    const nested = await script(`return (() => { try { return String(tools.codemode) } catch (e) { return e.message } })() + " / " + (() => { try { return String(tools.handoff) } catch (e) { return e.message } })()`);
+    assert.match(nested, /tools\.codemode does not exist/);
+    assert.match(nested, /tools\.handoff does not exist/);
+
+    // Off again: everything as before, the model is offered all 15 tools.
+    await store.setExtension(row, c, { name: "codemode", enabled: false });
+    assert.deepEqual(await offeredToModel(), ALL_TOOL_NAMES);
+    assert.doesNotMatch(JSON.stringify((await store.agentDetail(row, c)).tools ?? ""), /"codemode"/);
+  } finally {
+    await store.close();
+    await t.cleanup();
+  }
+});
+
+test("codemode subagents: a script runs 12 subagents with at most 8 at once; a script-made child cannot spawn its own", async () => {
+  const t = await tempStore();
+  const store = await t.open();
+  try {
+    const session = await store.create({ name: "Fanout", cwd: t.work, model: faux });
+    const { row, h, c } = await store.resolveAgent(session.id, "main");
+    await store.setExtension(row, c, { name: "codemode", enabled: true });
+    let n = 0;
+    const script = async (code: string, sample?: () => Promise<void>) => {
+      const submission = await store.send(c, { content: `code:${code}`, requestId: `fan-${++n}` });
+      let settled = await store.settled(h, submission.id as number, 0);
+      while (settled.status !== "done") {
+        await sample?.();
+        await delay(100);
+        settled = await store.settled(h, submission.id as number, 0);
+      }
+      return settled.answer.text;
+    };
+    const childText = `JSON.parse(x).flatMap((m) => m.content).filter((b) => b.type === "text").map((b) => b.text).join("")`;
+
+    // 12 children at once, each answering its echo.
+    const text = await script(
+      `const r = await Promise.all(Array.from({ length: 12 }, (_, i) => tools.subagent({ task: "ping " + (i + 1) })));
+       return r.map((x) => ${childText}).join("|");`,
+    );
+    for (let i = 1; i <= 12; i++) assert.match(text, new RegExp(`Echo: ping ${i}(\\||$)`), `child ${i} answered`);
+    assert.equal((await store.agents(row)).filter((a) => a.kind === "subagent").length, 12, "twelve children exist");
+
+    // The cap: 12 children that each take a second; the subagent tool admits 8 per script, the rest wait for a slot.
+    // Sampled every 100 ms, the busy children never exceed 8, and the second wave means the run takes two seconds.
+    let peak = 0;
+    const samples: number[] = [];
+    const started = Date.now();
+    const slow = await script(
+      `const r = await Promise.all(Array.from({ length: 12 }, (_, i) => tools.subagent({ task: "!sleep 1; echo slept " + (i + 1) })));
+       return r.map((x) => ${childText}).join("|");`,
+      async () => {
+        const busy = (await store.agents(row)).filter((a) => a.kind === "subagent" && a.busy).length;
+        samples.push(busy);
+        peak = Math.max(peak, busy);
+      },
+    );
+    for (let i = 1; i <= 12; i++) assert.match(slow, new RegExp(`slept ${i}\\b`), `slow child ${i} answered`);
+    assert.equal(peak, MAX_SCRIPT_SUBAGENTS, `exactly ${MAX_SCRIPT_SUBAGENTS} children ran at once; saw ${peak} (${samples.join(",")})`);
+    assert.ok(Date.now() - started >= 2000, "the four children over the cap waited for the first wave");
+
+    // A child made by a script has no subagent tool: its own script fails on tools.subagent.
+    const grandchild = await script(`const x = await tools.subagent({ task: "code:return String(tools.subagent)" }); return ${childText};`);
+    assert.match(grandchild, /tools\.subagent does not exist/);
+    const children = (await store.agents(row)).filter((a) => a.kind === "subagent");
+    assert.equal(children.length, 25);
+    const last = await store.resolveAgent(session.id, String(children.at(-1)!.id));
+    const childDetail = await store.agentDetail(row, last.c);
+    assert.ok(!childDetail.tools.some((x) => x.name === "subagent" && x.offered), "the child is not offered subagent");
+    assert.equal(childDetail.extensions.includes("codemode"), true, "the child inherits code mode");
   } finally {
     await store.close();
     await t.cleanup();

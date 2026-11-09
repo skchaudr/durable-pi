@@ -4,11 +4,18 @@
 //
 //   system-prompts       a checklist of built-in system prompts, rendered as one section
 //   jev-damage-control   Jev judges every bash command before it runs and blocks destructive ones
+//   codemode             the model writes JavaScript that calls this agent's tools in a QuickJS sandbox; while it is
+//                        on, the model is offered only codemode, bash and handoff (store.setExtension sets modelTools)
+//                        and every script gets the continue-and-mark prelude (script-prelude.ts)
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { defineDoc, defineExtension, hook, section, ToolTask, type Extension } from "@earendil-works/pi-durable";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import type { HarnessExtensionInfo } from "../../dpi-sdk/src/api.js";
 import { askJev, type JevAnswer, type JevQuestion } from "./jev.js";
+import { interruptedCalls, interruptedTrailer, wrapScript } from "./script-prelude.js";
+import { MAX_SCRIPT_SUBAGENTS } from "./extensions.js";
 
 const PROMPTS_DIR = join(import.meta.dirname, "../prompts");
 
@@ -81,6 +88,44 @@ async function judgeOffline(command: string): Promise<Verdict> {
 
 // ------------------------------------------------------------------ the extensions
 
+// ------------------------------------------------------------------ codemode
+
+/** One sandbox per process: each execution gets its own worker thread, so sessions share it safely. */
+let sandbox: CodemodeSandbox | undefined;
+const CODEMODE_MEMORY_BYTES = 256 * 1024 * 1024;
+export function codemodeSandbox() {
+  return (sandbox ??= new CodemodeSandbox({ memoryLimitBytes: CODEMODE_MEMORY_BYTES }));
+}
+export async function closeCodemodeSandbox() {
+  const s = sandbox;
+  sandbox = undefined;
+  await s?.close();
+}
+
+/** The tools the model is offered while code mode is on; every other enabled tool is reached from scripts. */
+export const CODEMODE_MODEL_TOOLS = ["codemode", "bash", "handoff"] as const;
+
+/** The tools scripts call while code mode is on: everything enabled but the script tool and handoff. */
+export const CODEMODE_SCRIPT_TOOLS = [
+  "read",
+  "write",
+  "edit",
+  "read_state",
+  "update_state",
+  "run_durable_job",
+  "check_durable_job",
+  "list_durable_jobs",
+  "search_history",
+  "view_image",
+  "subagent",
+  "start_session",
+  "ping_on_call_engineer",
+] as const;
+
+/** Rendered from the request's own resolution, so a read-only agent or a removed tool is never promised. */
+const codemodePrompt = (offered: readonly string[], callable: readonly string[]) =>
+  `Code mode is on. Your direct tools are ${offered.join(", ").replace(/, (\w+)$/, " and $1")}. Every other tool (${callable.filter((n) => !offered.includes(n)).join(", ")}) is called from inside a codemode script as await tools.<name>(args). A call interrupted by a restart resolves as { interrupted: true, ... } instead of throwing; the script continues. At most ${MAX_SCRIPT_SUBAGENTS} subagents run at once per script.`;
+
 export const ADDON_INFO: Omit<HarnessExtensionInfo, "enabled" | "prompts">[] = [
   {
     name: "system-prompts",
@@ -92,6 +137,12 @@ export const ADDON_INFO: Omit<HarnessExtensionInfo, "enabled" | "prompts">[] = [
     title: "Jev damage control",
     description:
       "Before every bash call, Jev judges the command in about 300 ms and blocks irreversible or destructive ones. The decision is a durable memo, so a restart never re-asks. If Jev is down, commands run.",
+  },
+  {
+    name: "codemode",
+    title: "Code mode",
+    description:
+      "Adds a codemode tool: the model writes JavaScript that calls this agent's tools as await tools.<name>(args) in a QuickJS sandbox. Only the script's output enters the context. A script survives a restart and resumes without re-running finished calls; a call the restart interrupted resolves as { interrupted: true } and the script goes on. While on, the model is offered only codemode, bash and handoff; scripts reach the rest, with at most 8 subagents at once.",
   },
 ];
 
@@ -132,8 +183,44 @@ export function createAddons(opts: { offline: boolean }) {
       }),
     ],
   });
-  const all: Record<string, Extension> = { "system-prompts": prompts, "jev-damage-control": jev };
-  return { all, list: [prompts, jev] };
+  const base = createCodemodeExtension({ sandbox: codemodeSandbox(), models: false });
+  // pi-durable's extension plus the host's part: the prelude on every model-issued script, the trailer naming the
+  // calls a restart interrupted, and a prompt section that only renders while code mode is on.
+  const codemode: Extension = {
+    ...base,
+    hooks: [
+      ...(base.hooks ?? []),
+      hook(ToolTask, {
+        beforeTool: async (call) => {
+          if (call.name !== "codemode" || call.parent) return;
+          const code = (call.arguments as { code?: unknown }).code;
+          if (typeof code !== "string") return;
+          return { arguments: { ...call.arguments, code: wrapScript(code) } };
+        },
+        afterTool: async (call, result) => {
+          if (call.name !== "codemode" || call.parent) return;
+          const trailer = interruptedTrailer(interruptedCalls(result.details));
+          if (!trailer) return;
+          const output = [...(result.output ?? [])];
+          const last = output.at(-1);
+          if (last?.type === "text") output[output.length - 1] = { ...last, text: last.text + trailer };
+          else output.push({ type: "text", text: trailer.trimStart() });
+          return { ...result, output };
+        },
+      }),
+    ],
+    sections: [...(base.sections ?? []), section(
+        "dpi-codemode",
+        (input) =>
+          codemodePrompt(
+            input.agent.tools.map((t) => t.name),
+            input.agent.callable.filter((t) => !t.name.startsWith("pi.codemode.")).map((t) => t.name),
+          ),
+        { tag: false },
+      )],
+  };
+  const all: Record<string, Extension> = { "system-prompts": prompts, "jev-damage-control": jev, codemode };
+  return { all, list: [prompts, jev, codemode] };
 }
 
 export type Addons = ReturnType<typeof createAddons>;
