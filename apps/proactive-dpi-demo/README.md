@@ -18,7 +18,7 @@ From the project root, `just proactive` lists install, build, reset, start, take
 
 `npm start` boots the backend, starts the log stream, and prints a short banner with the URL. The terminal shows nothing else, so it can stay on camera. Process output goes to `.data/demo.log`; `--verbose` shows it instead.
 
-Keys come from the project root `.env`. `OPENROUTER_API_KEY` covers Claude Sonnet 5.5 and Jev (`~typesafe/jev-latest`). `ELEVENLABS_API_KEY` covers the voice (default voice Emma from the ElevenLabs voice library; set `ELEVENLABS_VOICE_ID` to any voice in your account). Without it the line shows only as a toast. With `--tts browser` (the default off macOS), click the page once so the browser allows audio. `TYPESAFE_API_KEY`, when set, sends Jev calls to TypeSafe directly. `npm run dev` adds Vue hot reload. `npm run logs` and `npm run be` run the two processes separately.
+Keys come from the project root `.env`. The agent runs on CLIProxyAPI (`CLIPROXY_API_KEY`, the same endpoint as the dpi backend). Jev uses `TYPESAFE_API_KEY`, else `OPENROUTER_API_KEY` (`~typesafe/jev-latest`). `ELEVENLABS_API_KEY` covers the voice (default voice Emma from the ElevenLabs voice library; set `ELEVENLABS_VOICE_ID` to any voice in your account). Without it the line shows only as a toast. With `--tts browser` (the default off macOS), click the page once so the browser allows audio. `TYPESAFE_API_KEY`, when set, sends Jev calls to TypeSafe directly. `npm run dev` adds Vue hot reload. `npm run logs` and `npm run be` run the two processes separately.
 
 Run `npm run reset` before every take. The demo must be stopped first.
 
@@ -54,7 +54,7 @@ The timeline depends on Jev. Up to 6 Jev calls run at once, and 429, 502, 503 an
 | `--incident-threshold <n>` | `3` | Incident verdicts (probability 0.6 or more) with one fingerprint that open an incident |
 | `--suspicious-threshold <n>` | `8` | Suspicious verdicts with one fingerprint that open an incident |
 | `--window <s>` | `120` | Window for both thresholds |
-| `--model <id>` | `anthropic/claude-sonnet-5.5` | Agent model (OpenRouter). Switchable per conversation in the UI |
+| `--model <id>` | `claude-sonnet-5-5` | Agent model, a CLIProxyAPI id from `model-catalog.ts` (endpoint `CLIPROXY_BASE_URL`, default `http://127.0.0.1:8317/v1`; key `CLIPROXY_API_KEY`). Switchable per conversation in the UI |
 | `--thinking <level>` | `high` | Agent thinking level |
 | `--verbose` | off | Show process output in the terminal |
 | `--log-rows` | off | Print every log row (with `--verbose`) |

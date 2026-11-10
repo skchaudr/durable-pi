@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { projectEnvPath } from "../../../shared/paths.ts";
 
-// OPENROUTER_API_KEY and ELEVENLABS_API_KEY live in the project root .env.
+// CLIPROXY_API_KEY (agent), TYPESAFE_API_KEY or OPENROUTER_API_KEY (Jev) and ELEVENLABS_API_KEY live in the project root .env.
 if (existsSync(projectEnvPath)) process.loadEnvFile(projectEnvPath);
 
 const args = process.argv.slice(2);
@@ -20,7 +20,10 @@ export const config = {
   /** Loopback by default: the UI has no login and the incident agent runs bash. Pass --host 0.0.0.0 for a LAN. */
   host: option("--host", "127.0.0.1"),
   dev: args.includes("--dev"),
-  model: option("--model", "anthropic/claude-sonnet-5.5"),
+  /** A CLIProxyAPI model id from model-catalog.ts. */
+  model: option("--model", "claude-sonnet-5-5"),
+  /** CLIProxyAPI's OpenAI-compatible endpoint, as in the dpi backend's ~/.dpi/models.json. */
+  cliproxyUrl: process.env.CLIPROXY_BASE_URL ?? "http://127.0.0.1:8317/v1",
   thinking: option("--thinking", "high") as "off" | "minimal" | "low" | "medium" | "high" | "xhigh",
   /** Incident verdicts sharing one fingerprint inside the window that open an incident. */
   incidentThreshold: Number(option("--incident-threshold", "3")),

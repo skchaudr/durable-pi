@@ -3,8 +3,9 @@
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { envApiKeyAuth, type Model } from "@earendil-works/pi-ai";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import {
   Harness,
   configure,
@@ -28,6 +29,26 @@ import type { Voice } from "./voice.ts";
 import type { WatchStore } from "./watch-store.ts";
 import type { Trigger } from "./watcher.ts";
 
+const PROVIDER = "cliproxy";
+
+/** A catalog entry as a chat model on CLIProxyAPI's OpenAI-compatible endpoint (as the dpi backend's operator models). */
+function cliproxyModel(c: (typeof curatedModels)[number]): Model<"openai-completions"> {
+  const reasoning = "reasoning" in c && c.reasoning;
+  return {
+    id: c.id,
+    name: c.name,
+    api: "openai-completions",
+    provider: PROVIDER,
+    baseUrl: config.cliproxyUrl,
+    reasoning,
+    ...(reasoning ? { thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" } } : {}),
+    input: [...c.input],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: c.contextWindow,
+    maxTokens: c.maxTokens,
+  };
+}
+
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 export class Ops extends EventEmitter {
@@ -47,15 +68,19 @@ export class Ops extends EventEmitter {
 
   static async open(store: WatchStore, voice: Voice) {
     const models = createModels();
-    const provider = openrouterProvider();
-    const catalog = provider.getModels();
-    if (!catalog.some((m) => m.id === config.model))
-      throw Error(`OpenRouter has no model ${config.model}`);
-    models.setProvider({
-      ...provider,
-      getModels: () =>
-        catalog.filter((m) => m.id === config.model || curatedModels.some((c) => c.id === m.id)),
-    });
+    // The agent runs on CLIProxyAPI, the endpoint the dpi backend uses, so turns go to already-paid subscriptions.
+    models.setProvider(
+      createProvider({
+        id: PROVIDER,
+        name: "CLIProxyAPI",
+        baseUrl: config.cliproxyUrl,
+        auth: { apiKey: envApiKeyAuth("CLIProxyAPI API key", ["CLIPROXY_API_KEY"]) },
+        models: curatedModels.map(cliproxyModel),
+        api: openAICompletionsApi(),
+      }),
+    );
+    if (!models.getModel(PROVIDER, config.model))
+      throw Error(`${config.model} is not in model-catalog.ts (CLIProxyAPI ids, e.g. ${curatedModels[0].id})`);
     let ops: Ops | undefined;
     const extensions = createExtensions({
       store,
@@ -92,7 +117,7 @@ export class Ops extends EventEmitter {
       );
       const root = await harness.root(ctx, {
         agent: {
-          model: { provider: "openrouter", modelId: config.model },
+          model: { provider: PROVIDER, modelId: config.model },
           thinkingLevel: config.thinking,
           extensions: [extensions.OpsTools, extensions.Desk],
           cwd: repoDir,
@@ -140,7 +165,7 @@ export class Ops extends EventEmitter {
       const branch = `incident/${slug}`;
       const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
       await configure(tx, conversation.id, {
-        model: { provider: "openrouter", modelId: config.model },
+        model: { provider: PROVIDER, modelId: config.model },
         thinkingLevel: config.thinking,
         extensions: [CodingTools, this.extensions.OpsTools, this.extensions.IncidentAgent],
         cwd: worktree,
@@ -247,9 +272,9 @@ Your worktree ${incident.worktree} is checkout-api on branch ${incident.branch},
 
   modelList() {
     return curatedModels.flatMap((c) => {
-      const m = this.models.getModel("openrouter", c.id);
+      const m = this.models.getModel(PROVIDER, c.id);
       return m
-        ? [{ id: m.id, provider: "openrouter", name: c.name, tier: c.tier, icon: c.icon, contextWindow: m.contextWindow }]
+        ? [{ id: m.id, provider: PROVIDER, name: c.name, tier: c.tier, icon: c.icon, contextWindow: m.contextWindow }]
         : [];
     });
   }
@@ -284,7 +309,7 @@ Your worktree ${incident.worktree} is checkout-api on branch ${incident.branch},
         };
       case "configure": {
         const model = body.model as ModelRef | undefined;
-        if (model && (model.provider !== "openrouter" || !this.models.getModel("openrouter", model.modelId)))
+        if (model && (model.provider !== PROVIDER || !this.models.getModel(PROVIDER, model.modelId)))
           throw Error("Choose a model from the list");
         if (body.thinkingLevel !== undefined && !THINKING.includes(String(body.thinkingLevel)))
           throw Error("Invalid thinking level");
