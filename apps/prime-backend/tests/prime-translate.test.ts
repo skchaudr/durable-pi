@@ -194,12 +194,16 @@ describe("revival events", () => {
       interruptedToolCalls: [{ toolCallId: "c1", toolName: "python_repl", started: true }],
       at: "2026-11-11T15:17:14.063Z",
     });
-    assert.equal(live.length, 1);
-    const ev = live[0] as Extract<WireAgentEvent, { type: "entry_appended" }>;
+    // the interrupted call is closed (Prime writes its result to the file only), then the chat line
+    assert.deepEqual(live.map((x) => x.type), ["tool_execution_end", "message_end", "entry_appended"]);
+    const closed = (live[1] as Extract<WireAgentEvent, { type: "message_end" }>).entry;
+    assert.equal(closed.kind, "pi.tool-result");
+    assert.equal((closed.model![0] as { toolCallId: string }).toolCallId, "c1");
+    const ev = live[2] as Extract<WireAgentEvent, { type: "entry_appended" }>;
     assert.equal(ev.type, "entry_appended");
     assert.equal(ev.entry.kind, "prime.revival");
     assert.equal((ev.entry.data as { text: string }).text, "Turn continued after a restart. Interrupted: python_repl (may have partly run).");
-    assert.equal(t.snapshot().entries.length, 1);
+    assert.equal(t.snapshot().entries.length, 2);
 
     const rows = messagesToEntries([
       { role: "custom", customType: "revival_event", display: true, details: { type: "revival", outcome: "skipped", reason: "its busy evidence is stale", restarts: 0 } },

@@ -251,7 +251,19 @@ export class Translator {
       case "revival":
       case "revival_continued":
       case "worker_restarted": {
-        const entry: WireEntry = { id: this.nextId++, conversationId: 1, kind: REVIVAL_KIND, data: { text: revivalText(e), event: e } };
+        // Prime writes the interrupted calls' results straight into the session file, with no live message_end.
+        if (e.type === "revival_continued")
+          for (const c of (Array.isArray(e.interruptedToolCalls) ? e.interruptedToolCalls : []) as J[]) {
+            if (this.results.has(c.toolCallId)) continue;
+            const text = c.started ? `Tool ${c.toolName} was interrupted and may have partially run.` : `Tool ${c.toolName} did not run: the session restarted before it started.`;
+            const m = { role: "toolResult", toolCallId: c.toolCallId, toolName: c.toolName, content: [{ type: "text", text }], isError: true } as WireMessage;
+            const result: WireEntry = { id: this.nextId++, conversationId: 1, kind: "pi.tool-result", model: [m] };
+            this.entries.push(result);
+            this.results.set(c.toolCallId, result);
+            this.tools.delete(c.toolCallId);
+            out.push({ type: "tool_execution_end", toolCallId: c.toolCallId, toolName: c.toolName, entry: result }, { type: "message_end", entry: result });
+          }
+        const entry: WireEntry ={ id: this.nextId++, conversationId: 1, kind: REVIVAL_KIND, data: { text: revivalText(e), event: e } };
         this.entries.push(entry);
         out.push({ type: "entry_appended", entry });
         break;
