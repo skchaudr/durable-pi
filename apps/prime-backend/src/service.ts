@@ -309,6 +309,15 @@ export class Service {
     return config;
   }
 
+  /** Prime's new_session starts a new session file; the catalog follows it so a backend restart reopens the new one. */
+  async reset(row: SessionRow, note: unknown) {
+    if (typeof note === "string" && note.trim()) throw invalid("Prime has no handoff note on a new session");
+    const { primeSessionId } = await this.handle(row).reset();
+    this.catalog.setPrimeSession(row.id, primeSessionId);
+    this.notify();
+    return { ok: true as const };
+  }
+
   /** Dedupes on `requestId` (also across restarts); the driver sees each request once. */
   async send(row: SessionRow, body: Record<string, unknown>) {
     if (typeof body.content !== "string" || !body.content.trim() || body.content.length > 100000)

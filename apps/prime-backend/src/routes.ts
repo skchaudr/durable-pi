@@ -66,8 +66,8 @@ export function v1(svc: Service) {
   r.get("/sessions/:s", (_req, res) => res.json(svc.sessionSummary(L(res).row)));
   r.patch("/sessions/:s", (req, res) => res.json(svc.rename(L(res).row, req.body?.name)));
   r.delete("/sessions/:s", route(async (_req, res) => res.json(await svc.archive(L(res).row))));
-  r.get("/sessions/:s/compaction", unsupported);
-  r.patch("/sessions/:s/compaction", unsupported);
+  r.get("/sessions/:s/compaction", route(async (_req, res) => res.json(await svc.handle(L(res).row).compaction())));
+  r.patch("/sessions/:s/compaction", route(async (req, res) => res.json(await svc.handle(L(res).row).setCompaction(req.body ?? {}))));
   r.get("/sessions/:s/events", (_req, res, next) => {
     try {
       sessionStream(svc, L(res).row, res);
@@ -126,8 +126,8 @@ export function v1(svc: Service) {
   r.patch(`${a}/config`, route(async (req, res) => res.json(await svc.configure(L(res).row, req.body ?? {}))));
   r.get(`${a}/extensions`, route(async (_req, res) => res.json(await L(res).h.extensions())));
   r.patch(`${a}/extensions`, route(async (req, res) => res.json(await L(res).h.patchExtensions(req.body ?? {}))));
-  r.post(`${a}/compact`, unsupported);
-  r.post(`${a}/reset`, unsupported);
+  r.post(`${a}/compact`, route(async (req, res) => res.json(await L(res).h.compact(typeof req.body?.instructions === "string" && req.body.instructions.trim() ? req.body.instructions : undefined))));
+  r.post(`${a}/reset`, route(async (req, res) => res.json(await svc.reset(L(res).row, req.body?.note))));
   r.get(`${a}/docs/:kind`, unsupported);
   r.all(`${a}/demo/{*rest}`, unsupported);
 

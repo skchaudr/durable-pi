@@ -24,7 +24,7 @@ const KINDS = ["prompt", "memory", "skill", "subagent", "factory"] as const;
 const TOOL_NAMES = ["python_repl", "bash", "edit"];
 const WRITING_TOOLS = new Set(["python_repl", "bash", "edit"]);
 
-async function readJson(path: string): Promise<any> {
+export async function readJson(path: string): Promise<any> {
   try {
     return JSON.parse(await readFile(path, "utf8"));
   } catch {

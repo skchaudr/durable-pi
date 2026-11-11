@@ -60,6 +60,9 @@ export class Catalog {
   setThinking(id: string, level: string) {
     this.db.prepare("UPDATE sessions SET thinkingLevel=? WHERE id=?").run(level, id);
   }
+  setPrimeSession(id: string, primeSessionId: string) {
+    this.db.prepare("UPDATE sessions SET primeSessionId=? WHERE id=?").run(primeSessionId, id);
+  }
   archive(id: string) {
     this.db.prepare("UPDATE sessions SET archived=1 WHERE id=?").run(id);
   }

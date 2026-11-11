@@ -15,9 +15,11 @@ import {
 import type { TaskNode, TaskOutcome } from "@sdk/api";
 import { jobRunDone } from "@sdk/jobs";
 import { message } from "../client/hub";
-import { agentHandle, sessionHandle, tasks } from "../client/store";
+import { agentHandle, device, sessionHandle, tasks } from "../client/store";
 import { decide, jobDef, jobDefs, jobRuns, openAgent, pending, revealRun, startJob } from "../client/jobs";
 
+// Prime has no durable jobs; its tasks are schedules, heartbeats and a goal.
+const prime = computed(() => device.value?.info?.durableVersion === "prime");
 const error = ref("");
 const stopping = ref(false);
 const recent = ref<TaskOutcome[]>([]);
@@ -120,7 +122,7 @@ const outcomes = computed(() =>
     </div>
     <p v-if="error" class="message-error" role="alert">{{ error }}</p>
 
-    <section class="task-section" aria-label="Durable jobs">
+    <section v-if="!prime" class="task-section" aria-label="Durable jobs">
       <h3><Repeat :size="18" />Durable jobs</h3>
       <p class="hint">
         Repeatable workflows with named phases. Every run follows the same phases and saves a checkpoint after each one.
@@ -173,11 +175,16 @@ const outcomes = computed(() =>
         <h3>Agent activity</h3>
         <Activity :size="18" />
       </div>
-      <p class="hint">
+      <p v-if="prime" class="hint">
+        Prime's schedules, heartbeats and goal show here while they are live. Stop all cancels them.
+      </p>
+      <p v-else class="hint">
         Every model response and every tool call is its own durable task with an id, an owner and a checkpoint. Follow
         them live here; after a restart each one resumes or reports how it ended.
       </p>
-      <p v-if="!rows.length" class="task-empty">Nothing running. Send a message or run a job.</p>
+      <p v-if="!rows.length" class="task-empty">
+        {{ prime ? "Nothing running. Ask Prime to set a schedule, heartbeat or goal." : "Nothing running. Send a message or run a job." }}
+      </p>
       <ul v-else class="task-tree">
         <li
           v-for="{ task, depth } in rows"

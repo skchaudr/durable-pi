@@ -157,10 +157,6 @@ test("agents: addressing, detail, config, entries, transcript, benign and unsupp
     // everything else
     const nope: [string, string, unknown][] = [
       ["POST", `${base}/agents/main/fork`, { entryId: 1 }],
-      ["POST", `${base}/agents/main/compact`, {}],
-      ["POST", `${base}/agents/main/reset`, {}],
-      ["PATCH", `${base}/compaction`, { reserveTokens: 2048 }],
-      ["GET", `${base}/compaction`, undefined],
       ["POST", `${base}/agents/main/demo/state`, {}],
       ["POST", `${base}/agents/main/demo/jobs/3/approval`, {}],
       ["DELETE", `${base}/agents/main/inbox/1`, undefined],
@@ -196,6 +192,40 @@ test("agents: addressing, detail, config, entries, transcript, benign and unsupp
     assert.match((await b.call("GET", `${base}/agents/main/transcript?format=markdown`)).body.text, /Echo: ping/);
   } finally {
     await b.stop();
+    await b.cleanup();
+  }
+});
+
+test("compaction, compact and reset go to the driver; a reset moves the catalog to the new Prime session", async () => {
+  const b = await boot();
+  try {
+    const s = await newSession(b);
+    const base = `/v1/sessions/${s.id}`;
+    const oldId = [...b.driver.agents.keys()][0];
+    const agent = b.driver.agent(oldId);
+    assert.deepEqual((await b.call("GET", `${base}/compaction`)).body, { enabled: true, reserveTokens: 16384, backgroundTokens: 0, keepRecentTokens: 20000 });
+    assert.equal((await b.call("PATCH", `${base}/compaction`, { enabled: false })).body.enabled, false);
+    assert.equal(agent.autoCompaction, false);
+    const bad = await b.call("PATCH", `${base}/compaction`, { reserveTokens: 2048 });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "invalid");
+
+    assert.deepEqual((await b.call("POST", `${base}/agents/main/compact`, { instructions: " keep the plan " })).body, { taskId: 1 });
+    assert.deepEqual((await b.call("POST", `${base}/agents/main/compact`, {})).body, { taskId: 2 });
+    assert.deepEqual(agent.compacts, [" keep the plan ", undefined]);
+
+    assert.equal((await b.call("POST", `${base}/agents/main/reset`, { note: "carry on" })).status, 400);
+    assert.deepEqual((await b.call("POST", `${base}/agents/main/reset`, {})).body, { ok: true });
+    await b.stop();
+    const driver = new FakeDriver();
+    const again = await boot({ dir: b.dir, token: b.token, driver });
+    try {
+      assert.notEqual(driver.opened[0].primeSessionId, oldId);
+    } finally {
+      await again.stop();
+      await again.cleanup();
+    }
+  } finally {
     await b.cleanup();
   }
 });

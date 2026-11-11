@@ -3,6 +3,7 @@ import type {
   AgentConfig,
   AgentDetail,
   AgentExtensions,
+  CompactionSettings,
   TaskNode,
   TaskOutcome,
   ModelInfo,
@@ -23,6 +24,10 @@ export interface PrimeAgentHandle {
   extensions(): Promise<AgentExtensions>;
   patchExtensions(body: unknown): Promise<AgentExtensions>;
   tools(): Promise<AgentDetail["tools"]>;
+  compaction(): Promise<CompactionSettings>;
+  setCompaction(patch: Record<string, unknown>): Promise<CompactionSettings>;
+  compact(instructions?: string): Promise<{ taskId: number }>; // answers once the summary has started
+  reset(): Promise<{ primeSessionId: string }>; // Prime's new_session: a fresh session file, which the catalog must follow
   tasks(): TaskSource;
 }
 

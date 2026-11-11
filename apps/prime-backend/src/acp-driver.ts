@@ -12,6 +12,7 @@ import { readDefaultModel, readModels } from "./prime/models.js";
 import { Translator, messagesToEntries } from "./prime/translate.js";
 import * as ext from "./prime/extend.js";
 import { PrimeTasks } from "./prime/tasks.js";
+import * as comp from "./prime/compaction.js";
 
 export interface DriverOptions extends ClientOptions {
   socketPath?: string;
@@ -41,9 +42,9 @@ class PrimeSession implements PrimeAgentHandle {
     private readonly client: DaemonClient,
     private readonly sessionDir: string,
     private readonly env: NodeJS.ProcessEnv | undefined,
-    readonly primeSessionId: string,
+    public primeSessionId: string,
     private cwd: string,
-    private readonly sessionFile: string | undefined,
+    private sessionFile: string | undefined,
     private readonly register: (s: PrimeSession) => void,
     private readonly idDir?: string,
   ) {
@@ -152,6 +153,57 @@ class PrimeSession implements PrimeAgentHandle {
   }
   tools() {
     return ext.tools(this.extendCtx);
+  }
+
+  private get compactionCtx(): comp.CompactionContext {
+    return { client: this.client, agentDir: dirname(this.sessionDir), activeSessionId: this.activeId };
+  }
+  async compaction() {
+    return comp.compaction(this.compactionCtx).catch(fault);
+  }
+  async setCompaction(patch: Record<string, unknown>) {
+    return comp.setCompaction(this.compactionCtx, patch).catch(fault);
+  }
+
+  /** Prime answers compact when the summary is done; dpi answers with the task as soon as it starts. A failure before the start is the caller's error. */
+  async compact(instructions?: string) {
+    let taskId: number | undefined;
+    let started!: () => void;
+    const first = new Promise<void>((resolve) => (started = resolve));
+    const off = this.subscribe((events) => {
+      for (const e of events)
+        if (e.type === "compaction_start") {
+          taskId = e.taskId;
+          started();
+        }
+    });
+    const done = this.client.request({ type: "compact", activeSessionId: this.activeId, ...(instructions ? { customInstructions: instructions } : {}) }, 600000);
+    done.then(off, off);
+    // shortcut: a skip ("too short to compact") answers right after the start event, so give the answer 1s; a real summary takes longer.
+    const grace = new Promise<void>((resolve) => setTimeout(resolve, 1000));
+    try {
+      await Promise.race([first, done]);
+      await Promise.race([done, grace]);
+    } catch (e) {
+      fault(e);
+    }
+    if (taskId === undefined) throw new ApiFault("unavailable", "Prime finished compact without a compaction event");
+    return { taskId };
+  }
+
+  /** new_session swaps the worker onto a new session file; the translator restarts from it. */
+  async reset() {
+    try {
+      await this.client.request({ type: "new_session", activeSessionId: this.activeId });
+      const state = await this.client.request({ type: "get_connection_state", activeSessionId: this.activeId });
+      this.primeSessionId = state.sessionId;
+      this.sessionFile = state.sessionFile;
+      this.translator = new Translator({ entries: messagesToEntries(await this.loadMessages()), agent: this.agent });
+    } catch (e) {
+      fault(e);
+    }
+    this.emit([this.snapshot()]);
+    return { primeSessionId: this.primeSessionId };
   }
 
   config(): AgentConfig {
