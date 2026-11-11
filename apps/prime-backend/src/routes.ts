@@ -1,7 +1,7 @@
 // REST v1, same paths, bodies and status codes as dpi-backend/src/routes.ts for the parts Prime serves.
 // Everything else answers 400 "Not supported on Prime yet", except where the FE needs a benign empty answer.
 import { Router, type Request, type Response, type NextFunction } from "express";
-import type { PrimeAgentHandle } from "./driver.js";
+import type { PrimeAgentHandle, PrimeChild } from "./driver.js";
 import type { SessionRow } from "./catalog.js";
 import { DEVICE_DOC_KINDS, type Service } from "./service.js";
 import { agentStream, deviceStream, sessionStream } from "./streams.js";
@@ -14,7 +14,12 @@ const route = (fn: Async) => (req: Request, res: Response, next: NextFunction) =
 interface Locals {
   row: SessionRow;
   h: PrimeAgentHandle;
+  /** Set when the agent is one of Prime's child agents. */
+  child?: PrimeChild;
 }
+
+// What Prime can serve for a child agent: its summary, transcript and entries, read-only. Everything else is a 400.
+const CHILD_READS = /^\/sessions\/[^/]+\/agents\/[^/]+(\/(events|entries|transcript))?\/?$/;
 
 const param = (req: Request, key: string) => String(req.params[key]);
 const unsupported = route(async () => {
@@ -35,7 +40,10 @@ export function v1(svc: Service) {
   });
   r.param("a", (req, res, next, value: string) => {
     try {
-      Object.assign(res.locals, svc.resolveAgent(param(req, "s"), value));
+      const target = svc.resolveAgent(param(req, "s"), value);
+      if (target.child && !(req.method === "GET" && CHILD_READS.test(req.path)))
+        throw invalid("Prime child agents are read-only here: only GET agent, events, entries and transcript");
+      Object.assign(res.locals, target);
       next();
     } catch (e) {
       next(e);
@@ -97,21 +105,15 @@ export function v1(svc: Service) {
   r.get("/sessions/:s/agents", (_req, res) => res.json(svc.agents(L(res).row)));
   r.post("/sessions/:s/agents", unsupported);
   const a = "/sessions/:s/agents/:a";
-  r.get(a, route(async (_req, res) => res.json(await svc.agentDetail(L(res).row))));
+  r.get(a, route(async (_req, res) => res.json(await svc.agentDetail(L(res).row, L(res).child))));
   r.patch(a, unsupported);
-  r.get(`${a}/events`, (req, res, next) => {
-    try {
-      agentStream(svc, L(res), req, res);
-    } catch (e) {
-      next(e);
-    }
-  });
-  r.get(`${a}/entries`, (req, res) => {
-    const scope = String(req.query.scope ?? "all");
-    if (scope === "active") return void res.json({ items: svc.activeEntries(L(res).row) });
-    res.json(svc.entries(L(res).row, req.query.cursor as string | undefined, Number(req.query.limit ?? 500)));
-  });
-  r.get(`${a}/transcript`, (req, res) => res.json(svc.transcript(L(res).row, String(req.query.format ?? "json"))));
+  r.get(`${a}/events`, route((req, res) => agentStream(svc, L(res), req, res)));
+  r.get(`${a}/entries`, route(async (req, res) => {
+    const source = await svc.agentEntries(L(res).row, L(res).child);
+    if (String(req.query.scope ?? "all") === "active") return void res.json({ items: JSON.parse(JSON.stringify(source)) });
+    res.json(svc.entries(source, req.query.cursor as string | undefined, Number(req.query.limit ?? 500)));
+  }));
+  r.get(`${a}/transcript`, route(async (req, res) => res.json(svc.transcript(await svc.agentEntries(L(res).row, L(res).child), String(req.query.format ?? "json")))));
   r.post(
     `${a}/messages`,
     route(async (req, res) => {

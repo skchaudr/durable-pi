@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { boot, newSession, until } from "./helpers.js";
 import { FakeDriver } from "../src/fake-driver.js";
+import type { Frame } from "../../dpi-sdk/src/api.js";
 
 test("auth: /healthz is open, /v1 needs the token (Bearer or X-DPI-Token)", async () => {
   const b = await boot();
@@ -210,6 +211,53 @@ test("fs/dirs: start dirs, one level, not a directory", async () => {
     assert.deepEqual(level.dirs.map((d: { name: string }) => d.name), ["project"]);
     assert.equal(level.parent, b.dir);
     assert.equal((await b.call("GET", "/v1/fs/dirs?path=/nope/nope")).status, 404);
+  } finally {
+    await b.stop();
+    await b.cleanup();
+  }
+});
+
+test("Prime child agents: subagents in the tree and agents list, read-only agent view, 400 for the rest", async () => {
+  const b = await boot();
+  try {
+    const s = await newSession(b);
+    const main = b.driver.agent([...b.driver.agents.keys()][0]);
+    const frames = b.tail("/v1/events");
+    await frames.waitFor((f) => f.type === "tree", "first tree");
+    main.kids = [{ agentId: 2, id: "child-1", name: "worker-a", status: "running" }];
+    main.childEntries.set("child-1", [{ id: 1, conversationId: 1, kind: "pi.user", model: [{ role: "user", content: "child task", timestamp: 1 }] }]);
+    main.emitChildren();
+    const withKid = await frames.waitFor((f) => f.type === "tree" && f.tree.sessions[0].agents.length === 2, "tree with the child");
+    const kid = (withKid as Extract<Frame, { type: "tree" }>).tree.sessions[0].agents[1];
+    assert.deepEqual(kid, { id: 2, name: "worker-a", named: false, kind: "subagent", ownerAgentId: 1, busy: true, background: 0 });
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents`)).body.length, 2);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}`)).body.busy, true);
+
+    const detail = await b.call("GET", `/v1/sessions/${s.id}/agents/2`);
+    assert.equal(detail.status, 200);
+    assert.deepEqual([detail.body.id, detail.body.kind, detail.body.sessionId], [2, "subagent", s.id]);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/2/entries`)).body.items[0].model[0].content, "child task");
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/2/entries?scope=active`)).body.items.length, 1);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/2/transcript`)).status, 200);
+    const stream = b.tail(`/v1/sessions/${s.id}/agents/2/events`);
+    const snap = await stream.waitFor((f) => f.type === "snapshot", "child snapshot");
+    assert.equal((snap as Extract<Frame, { type: "snapshot" }>).snapshot.entries.length, 1);
+
+    for (const [method, path] of [["POST", "messages"], ["POST", "abort"], ["GET", "config"], ["PATCH", "config"], ["GET", "extensions"], ["POST", "fork"], ["PATCH", ""]]) {
+      const r = await b.call(method, `/v1/sessions/${s.id}/agents/2${path && `/${path}`}`, method === "GET" ? undefined : {});
+      assert.equal(r.status, 400, `${method} ${path}`);
+      assert.equal(r.body.error.code, "invalid");
+      assert.match(r.body.error.message, /child agents are read-only/);
+    }
+    assert.equal(main.sends.length, 0);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/9`)).status, 404);
+
+    main.childEntries.clear(); // Prime cannot read a child whose session is gone
+    const gone = await b.call("GET", `/v1/sessions/${s.id}/agents/2/entries`);
+    assert.equal(gone.status, 400);
+    assert.match(gone.body.error.message, /no live session for child child-1/);
+    frames.stop();
+    stream.stop();
   } finally {
     await b.stop();
     await b.cleanup();

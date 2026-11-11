@@ -1,7 +1,7 @@
 // Server-Sent Event streams, same frames and cadence as dpi-backend/src/streams.ts.
 import type { Request, Response } from "express";
 import type { DeviceTree, WireAgentEvent } from "../../dpi-sdk/src/api.js";
-import type { PrimeAgentHandle } from "./driver.js";
+import type { PrimeAgentHandle, PrimeChild } from "./driver.js";
 import type { SessionRow } from "./catalog.js";
 import { AGENT_DOC_KINDS, DEVICE_DOC_KINDS, type Service } from "./service.js";
 import { coalesce, diffActivity, openSse, parseDocs } from "./sse.js";
@@ -62,13 +62,15 @@ export function sessionStream(svc: Service, row: SessionRow, res: Response) {
   });
 }
 
-export function agentStream(_svc: Service, target: { row: SessionRow; h: PrimeAgentHandle }, req: Request, res: Response) {
-  const { row, h } = target;
+export async function agentStream(_svc: Service, target: { row: SessionRow; h: PrimeAgentHandle; child?: PrimeChild }, req: Request, res: Response) {
+  const { row, h, child } = target;
   const docs = parseDocs(req.query.docs, AGENT_DOC_KINDS);
-  const sse = openSse(res, { kind: "agent", sessionId: row.id, agentId: 1 });
+  // A child is read from Prime once, before the stream opens (so a failure is a plain 400); it has no live feed.
+  const read = child ? await h.childSnapshot(child.id) : undefined;
+  const sse = openSse(res, { kind: "agent", sessionId: row.id, agentId: child?.agentId ?? 1 });
   // Snapshot and subscription happen in one synchronous run, so no batch falls between them.
-  const snapshot = JSON.parse(JSON.stringify(h.snapshot()));
-  const off = h.subscribe((events) => {
+  const snapshot = JSON.parse(JSON.stringify(read ?? h.snapshot()));
+  const off = child ? () => {} : h.subscribe((events) => {
     if (sse.closed) return;
     const batch: readonly WireAgentEvent[] = JSON.parse(JSON.stringify(events));
     sse.send({ type: "batch", events: batch });

@@ -4,7 +4,7 @@ import { readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { AgentConfig, ModelInfo, ThinkingLevel, WhenBusy, WireAgentEvent, WireAgentState, WireSnapshotEvent } from "../../dpi-sdk/src/api.js";
 import type { BackendConfig } from "./config.js";
-import type { PrimeAgentHandle, PrimeDriver } from "./driver.js";
+import type { PrimeAgentHandle, PrimeChild, PrimeDriver } from "./driver.js";
 import { ApiFault, invalid } from "./errors.js";
 import { DaemonClient, PrimeError, type ClientOptions, type SessionEventFrame } from "./prime/client.js";
 import { launchEnv, primeEnv } from "./prime/env.js";
@@ -34,6 +34,7 @@ class PrimeSession implements PrimeAgentHandle {
   private translator?: Translator;
   private buffered: SessionEventFrame[] = []; // events that arrive while (re)opening
   private listeners = new Set<Listener>();
+  private childListeners = new Set<() => void>();
   private agent: WireAgentState;
   private submission = Date.now(); // ids only need to grow, also across backend restarts
 
@@ -66,6 +67,8 @@ class PrimeSession implements PrimeAgentHandle {
     const state = attached?.snapshot?.state ?? attached?.snapshot?.summary ?? made;
     const lastSeq: number = attached?.snapshot?.lastEventSequence ?? 0;
     const entries = messagesToEntries(await this.loadMessages());
+    // daemon get_rlm_children (state_getters.rs:30): the roster, for children that started before this attach.
+    const roster: unknown[] = (await this.client.request({ type: "get_rlm_children", activeSessionId: this.activeId }).catch(() => undefined))?.children ?? [];
     this.cwd = state.cwd ?? this.cwd;
     this.agent = {
       ...(state.model ? { model: { provider: state.model.provider, modelId: state.model.id } } : {}),
@@ -73,19 +76,20 @@ class PrimeSession implements PrimeAgentHandle {
       cwd: this.cwd,
     };
     this.translator = new Translator({ entries, agent: this.agent });
+    for (const c of roster) this.translator.setChild(c as Record<string, unknown>);
     const buffered = this.buffered.filter((f) => (f.meta?.sequence ?? Infinity) > lastSeq);
     this.buffered = [];
     for (const f of buffered) this.onEvent(f);
     return made;
   }
 
-  private async loadMessages(): Promise<unknown[]> {
+  private async loadMessages(activeSessionId = this.activeId): Promise<unknown[]> {
     let all: unknown[] = [];
     let before: string | undefined;
     for (let i = 0; i < 200; i++) {
       const page = await this.client.request({
         type: "get_messages",
-        activeSessionId: this.activeId,
+        activeSessionId,
         page: { from: "end", ...(before ? { before } : {}), limit: 500 },
       });
       const messages: unknown[] = page?.messages ?? [];
@@ -112,6 +116,7 @@ class PrimeSession implements PrimeAgentHandle {
     } catch (e) {
       return void console.error(`[prime-backend] cannot translate ${frame.event?.type} for ${this.primeSessionId}:`, e);
     }
+    if (frame.event?.type === "rlm_child_update") for (const fn of [...this.childListeners]) fn();
     if (events.length) this.emit(events);
   }
 
@@ -130,6 +135,25 @@ class PrimeSession implements PrimeAgentHandle {
   }
   busy() {
     return this.translator?.busy() ?? false;
+  }
+  children(): PrimeChild[] {
+    return this.translator?.children() ?? [];
+  }
+  onChildren(fn: () => void) {
+    this.childListeners.add(fn);
+    return () => void this.childListeners.delete(fn);
+  }
+  /** Reads the child's session through its live id (get_messages); a child whose worker is gone has none, and Prime's error is the 400. */
+  async childSnapshot(id: string) {
+    const live = this.translator?.childRow(id)?.activeSessionId;
+    if (typeof live !== "string" || !live) throw invalid(`Prime has no live session for child ${id}`);
+    let messages: unknown[];
+    try {
+      messages = await this.loadMessages(live);
+    } catch (e) {
+      return fault(e);
+    }
+    return new Translator({ entries: messagesToEntries(messages), agent: { cwd: this.cwd } }).snapshot();
   }
   private taskSource?: PrimeTasks;
   tasks() {

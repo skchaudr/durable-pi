@@ -12,6 +12,16 @@ import type {
   WireSnapshotEvent,
 } from "../../dpi-sdk/src/api.js";
 
+/** One of Prime's child agents (RLM children) of a session. `agentId` is its place in the dpi tree; the main agent is 1. */
+export interface PrimeChild {
+  agentId: number;
+  /** Prime's own child id. */
+  id: string;
+  name: string;
+  /** Prime's run status: running | done | error | cancelled. */
+  status: string;
+}
+
 export interface PrimeAgentHandle {
   snapshot(): WireSnapshotEvent; // full current state of the agent, dpi wire shape
   subscribe(fn: (events: readonly WireAgentEvent[]) => void): () => void; // batches, already in dpi wire shape
@@ -24,6 +34,10 @@ export interface PrimeAgentHandle {
   patchExtensions(body: unknown): Promise<AgentExtensions>;
   tools(): Promise<AgentDetail["tools"]>;
   tasks(): TaskSource;
+  children(): PrimeChild[];
+  onChildren(fn: () => void): () => void; // the roster or a child's status changed
+  /** A child's transcript as Prime holds it now (no live feed); throws a 400 when Prime cannot serve it. */
+  childSnapshot(id: string): Promise<WireSnapshotEvent>;
 }
 
 /** Prime's schedules, heartbeats and goal as dpi tasks (src/prime/tasks.ts). Created in chat; listed and cancelled here. */

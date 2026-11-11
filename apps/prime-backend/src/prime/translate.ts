@@ -13,6 +13,7 @@ import type {
   WireToolSlot,
   WireUsage,
 } from "../../../dpi-sdk/src/api.js";
+import type { PrimeChild } from "../driver.js";
 
 // Prime events are untyped JSON at this boundary.
 type J = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -123,6 +124,8 @@ export class Translator {
   private results = new Map<string, WireEntry>();
   private compaction?: WireCompaction;
   private nextTask = 1;
+  /** Prime child id -> its dpi agent id and merged fields. Ids count up from 2 in first-seen order (not kept across restarts). */
+  private kids = new Map<string, { agentId: number; row: J }>();
 
   constructor(init: { entries: WireEntry[]; agent: WireAgentState }) {
     this.entries = [...init.entries];
@@ -138,6 +141,27 @@ export class Translator {
 
   busy(): boolean {
     return !!this.run || this.pending;
+  }
+
+  /** A child from `get_rlm_children` or an rlm_child_update. Merged by id: later updates carry only what changed. */
+  setChild(child: J | undefined) {
+    const id = child?.id;
+    if (typeof id !== "string" || !id) return;
+    const had = this.kids.get(id);
+    this.kids.set(id, { agentId: had?.agentId ?? this.kids.size + 2, row: { ...had?.row, ...child } });
+  }
+
+  childRow(id: string): J | undefined {
+    return this.kids.get(id)?.row;
+  }
+
+  children(): PrimeChild[] {
+    return [...this.kids].map(([id, { agentId, row }]) => ({
+      agentId,
+      id,
+      name: String(row.sessionName || row.label || id),
+      status: String(row.status ?? "running"),
+    }));
   }
 
   snapshot(): WireSnapshotEvent {
@@ -268,7 +292,10 @@ export class Translator {
         out.push({ type: "entry_appended", entry });
         break;
       }
-      // tool_execution_progress (elapsedMs), goal_update, rlm_child_update and anything unknown: no dpi counterpart.
+      case "rlm_child_update":
+        this.setChild(e.child);
+        break;
+      // tool_execution_progress (elapsedMs), goal_update and anything unknown: no dpi counterpart.
       default:
         break;
     }

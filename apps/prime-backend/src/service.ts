@@ -21,7 +21,7 @@ import type {
 import { THINKING_LEVELS } from "../../dpi-sdk/src/api.js";
 import { lastAssistantText, toMarkdown, toTranscript } from "../../dpi-sdk/src/transcript.js";
 import { Catalog, type SessionRow } from "./catalog.js";
-import type { PrimeAgentHandle, PrimeDriver } from "./driver.js";
+import type { PrimeAgentHandle, PrimeChild, PrimeDriver } from "./driver.js";
 import { ApiFault, invalid, notFound } from "./errors.js";
 
 export const DEVICE_DOC_KINDS = ["app.shared-state"];
@@ -98,12 +98,14 @@ export class Service {
     this.handles.set(row.id, handle);
     this.errors.delete(row.id);
     // Busy flips and resets change the tree; everything else is for the agent stream only.
-    this.unsubs.set(
-      row.id,
-      handle.subscribe((events) => {
-        if (events.some((e) => e.type === "run_start" || e.type === "run_end" || e.type === "snapshot")) this.notify();
-      }),
-    );
+    const offEvents = handle.subscribe((events) => {
+      if (events.some((e) => e.type === "run_start" || e.type === "run_end" || e.type === "snapshot")) this.notify();
+    });
+    const offChildren = handle.onChildren(this.notify);
+    this.unsubs.set(row.id, () => {
+      offEvents();
+      offChildren();
+    });
     return handle;
   }
 
@@ -261,25 +263,31 @@ export class Service {
 
   // ------------------------------------------------------------ agents
 
+  /** The main agent, then Prime's child agents as subagents it owns. */
   agents(row: SessionRow): AgentSummary[] {
-    return [{ id: MAIN_AGENT, name: "Main", named: false, kind: "root", busy: this.handle(row).busy(), background: 0 }];
+    const h = this.handle(row);
+    const kids = h.children().map((c): AgentSummary => ({ id: c.agentId, name: c.name, named: false, kind: "subagent", ownerAgentId: MAIN_AGENT, busy: c.status === "running", background: 0 }));
+    return [{ id: MAIN_AGENT, name: "Main", named: false, kind: "root", busy: h.busy(), background: 0 }, ...kids];
   }
 
-  /** Agent `1`, `main` or the name `Main`; Prime sessions have no other agent. */
-  resolveAgent(sessionRef: string, agentRef: string) {
+  /** Agent `1`, `main` or the name `Main`; or one of Prime's child agents by its agent id (`child` is set then). */
+  resolveAgent(sessionRef: string, agentRef: string): { row: SessionRow; h: PrimeAgentHandle; child?: PrimeChild } {
     const row = this.resolveSession(sessionRef);
     const h = this.handle(row);
     const ref = agentRef.toLowerCase();
-    if (agentRef !== String(MAIN_AGENT) && ref !== "main") throw notFound(`No agent "${agentRef}" in session ${row.name}`);
-    return { row, h };
+    if (agentRef === String(MAIN_AGENT) || ref === "main") return { row, h };
+    const child = h.children().find((c) => String(c.agentId) === agentRef);
+    if (!child) throw notFound(`No agent "${agentRef}" in session ${row.name}`);
+    return { row, h, child };
   }
 
   agentSummary(row: SessionRow): AgentSummary {
     return this.agents(row)[0];
   }
 
-  async agentDetail(row: SessionRow): Promise<AgentDetail> {
+  async agentDetail(row: SessionRow, child?: PrimeChild): Promise<AgentDetail> {
     const h = this.handle(row);
+    if (child) return { ...this.agents(row).find((a) => a.id === child.agentId)!, sessionId: row.id, config: {}, tools: [], extensions: [] };
     return { ...this.agentSummary(row), sessionId: row.id, config: h.config(), tools: await h.tools(), extensions: [] };
   }
 
@@ -347,19 +355,21 @@ export class Service {
     return { ok: true as const };
   }
 
-  entries(row: SessionRow, cursor: string | undefined, limit: number): Page<WireEntry> {
+  /** The main agent's live entries, or a child's as Prime holds them now. */
+  async agentEntries(row: SessionRow, child?: PrimeChild): Promise<readonly WireEntry[]> {
+    const h = this.handle(row);
+    return child ? (await h.childSnapshot(child.id)).entries : h.snapshot().entries;
+  }
+
+  entries(source: readonly WireEntry[], cursor: string | undefined, limit: number): Page<WireEntry> {
     const after = decodeCursor(cursor);
-    const all = [...this.handle(row).snapshot().entries].sort((a, b) => a.id - b.id).filter((e) => after === undefined || e.id > after);
+    const all = [...source].sort((a, b) => a.id - b.id).filter((e) => after === undefined || e.id > after);
     const page = all.slice(0, Math.min(Math.max(limit || 500, 1), 2000));
     return { items: page, next: page.length < all.length ? encodeCursor(page[page.length - 1].id) : undefined };
   }
 
-  activeEntries(row: SessionRow): WireEntry[] {
-    return JSON.parse(JSON.stringify(this.handle(row).snapshot().entries)) as WireEntry[];
-  }
-
-  transcript(row: SessionRow, format: string) {
-    const items = toTranscript(this.activeEntries(row));
+  transcript(source: readonly WireEntry[], format: string) {
+    const items = toTranscript(JSON.parse(JSON.stringify(source)) as WireEntry[]);
     return format === "markdown" ? { format: "markdown", text: toMarkdown(items) } : { format: "json", items };
   }
 

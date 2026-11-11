@@ -12,7 +12,7 @@ import type {
   WireSnapshotEvent,
   WireUsage,
 } from "../../dpi-sdk/src/api.js";
-import type { PrimeAgentHandle, PrimeDriver } from "./driver.js";
+import type { PrimeAgentHandle, PrimeChild, PrimeDriver } from "./driver.js";
 import { invalid } from "./errors.js";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -78,6 +78,25 @@ export class FakeAgent implements PrimeAgentHandle {
   }
   async tools() {
     return [];
+  }
+  /** Prime child agents: set `kids` and call `emitChildren()`. `childEntries` is what each child's transcript reads. */
+  kids: PrimeChild[] = [];
+  childEntries = new Map<string, WireEntry[]>();
+  private childListeners = new Set<() => void>();
+  children() {
+    return this.kids.map((k) => ({ ...k }));
+  }
+  onChildren(fn: () => void) {
+    this.childListeners.add(fn);
+    return () => void this.childListeners.delete(fn);
+  }
+  emitChildren() {
+    for (const fn of [...this.childListeners]) fn();
+  }
+  async childSnapshot(id: string) {
+    const entries = this.childEntries.get(id);
+    if (!entries) throw invalid(`Prime has no live session for child ${id}`);
+    return { ...this.snapshot(), entries };
   }
   tasks() {
     return { liveTasks: async () => [], terminalTasks: async () => [], abort: async () => { throw invalid("No task"); }, onChange: () => () => {} };
