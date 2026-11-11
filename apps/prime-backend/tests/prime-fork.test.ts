@@ -8,6 +8,7 @@ import { after, test } from "node:test";
 import type { WireEntry } from "../../dpi-sdk/src/api.js";
 import createDriver from "../src/acp-driver.js";
 import { ApiFault } from "../src/errors.js";
+import { DaemonClient } from "../src/prime/client.js";
 import { forkPoint } from "../src/prime/fork.js";
 import { boot, until } from "./helpers.js";
 
@@ -134,4 +135,23 @@ test("integration: fork leaves the source on its file and gives the fork a worke
   const third = await driver.forkSession(primeSessionId, 1);
   assert.deepEqual(driver.agent(third.primeSessionId).snapshot().entries.map((e) => e.kind), ["pi.user"]);
   await assert.rejects(driver.forkSession(SID, 9), (e: ApiFault) => e.code === "invalid" && /not a user, assistant or tool result/.test(e.message));
+
+  // schedules: fork rebinds the source worker's jobs to the fork's file while it moves; switch_session must hand them back
+  const ops = new DaemonClient(socketPath);
+  await ops.connect(1);
+  try {
+    const src = (driver.agent(SID) as unknown as { activeId: string }).activeId;
+    const { job } = await ops.request({ type: "cron_add", activeSessionId: src, schedule: "0 0 1 1 *", prompt: "never fires in this test" }); // yearly: no model call
+    const mine = async () => ((await ops.request({ type: "cron_list", includeInactive: true })).jobs as { id: string; sessionId: string; sessionFile: string }[]).filter((j) => j.id === job.id);
+    assert.deepEqual((await mine()).map((j) => j.sessionId), [SID]);
+    const forked = await driver.forkSession(SID, 2);
+    const after = await mine();
+    assert.equal(after.length, 1, "the job survives the fork");
+    assert.equal(after[0].sessionId, SID, "the source still owns its job");
+    assert.ok(after[0].sessionFile.endsWith(`${SID}.jsonl`));
+    assert.notEqual(after[0].sessionId, forked.primeSessionId);
+    await ops.request({ type: "cron_cancel", jobId: job.id });
+  } finally {
+    ops.close();
+  }
 });
