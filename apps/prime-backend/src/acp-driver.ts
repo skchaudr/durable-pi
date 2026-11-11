@@ -192,6 +192,7 @@ class PrimeSession implements PrimeAgentHandle {
 
   /** Prime answers compact when the summary is done; dpi answers with the task as soon as it starts. A failure before the start is the caller's error. */
   async compact(instructions?: string) {
+    if (this.busy()) throw new ApiFault("busy", "The agent is busy; Prime compacts only between turns");
     let taskId: number | undefined;
     let started!: () => void;
     const first = new Promise<void>((resolve) => (started = resolve));

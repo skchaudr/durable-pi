@@ -195,6 +195,25 @@ test("agents: addressing, detail, config, entries, transcript, benign and unsupp
   }
 });
 
+test("compact on a busy agent is 409 busy and reaches the driver no further", async () => {
+  const b = await boot();
+  try {
+    b.driver.hold = true;
+    const s = await newSession(b);
+    assert.equal((await b.call("POST", `/v1/sessions/${s.id}/agents/main/messages`, { content: "one", requestId: "c1" })).status, 202);
+    const agent = b.driver.agent([...b.driver.agents.keys()][0]);
+    await until(() => agent.busy(), 5000, "busy");
+    const r = await b.call("POST", `/v1/sessions/${s.id}/agents/main/compact`, {});
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error.code, "busy");
+    assert.deepEqual(agent.compacts, []);
+    await b.call("POST", `/v1/sessions/${s.id}/agents/main/abort`, {});
+  } finally {
+    await b.stop();
+    await b.cleanup();
+  }
+});
+
 test("compaction, compact and reset go to the driver; a reset moves the catalog to the new Prime session", async () => {
   const b = await boot();
   try {

@@ -14,7 +14,7 @@ import type {
   WireUsage,
 } from "../../dpi-sdk/src/api.js";
 import type { PrimeAgentHandle, PrimeChild, PrimeDriver } from "./driver.js";
-import { invalid } from "./errors.js";
+import { ApiFault, invalid } from "./errors.js";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const usage = (): WireUsage => ({
@@ -113,6 +113,7 @@ export class FakeAgent implements PrimeAgentHandle {
     return this.compaction();
   }
   async compact(instructions?: string) {
+    if (this.busy()) throw new ApiFault("busy", "The agent is busy; Prime compacts only between turns");
     this.compacts.push(instructions);
     return { taskId: this.compacts.length };
   }
