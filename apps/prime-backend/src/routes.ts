@@ -120,7 +120,7 @@ export function v1(svc: Service) {
     }),
   );
   r.delete(`${a}/inbox/:submissionId`, unsupported);
-  r.post(`${a}/abort`, route(async (_req, res) => res.json(await svc.abort(L(res).row))));
+  r.post(`${a}/abort`, route(async (req, res) => res.json(await svc.abort(L(res).row, req.body?.background === true))));
   r.post(`${a}/fork`, unsupported);
   r.get(`${a}/config`, (_req, res) => res.json(L(res).h.config()));
   r.patch(`${a}/config`, route(async (req, res) => res.json(await svc.configure(L(res).row, req.body ?? {}))));

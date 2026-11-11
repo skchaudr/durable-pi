@@ -336,8 +336,14 @@ export class Service {
     }
   }
 
-  async abort(row: SessionRow) {
-    await this.handle(row).abort();
+  /** background: dpi's "Stop all", which also stops background runs: on Prime, its schedules, heartbeats and goal. */
+  async abort(row: SessionRow, background = false) {
+    const h = this.handle(row);
+    await h.abort();
+    if (background) {
+      const t = h.tasks();
+      for (const task of await t.liveTasks()) await t.abort(task.id);
+    }
     return { ok: true as const };
   }
 
