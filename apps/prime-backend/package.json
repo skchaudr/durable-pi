@@ -1,0 +1,23 @@
+{
+  "name": "prime-backend",
+  "private": true,
+  "type": "module",
+  "description": "A dpi-backend look-alike device (API v1) with Prime underneath, reached through a driver.",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "check": "tsc --noEmit -p .",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
