@@ -16,6 +16,17 @@ export interface SessionRow {
   archived: number;
 }
 
+/** An agent beyond the root: a session's agent 1 is the row's own primeSessionId and is not stored here. */
+export interface AgentRow {
+  sessionId: string;
+  id: number;
+  primeSessionId: string;
+  name: string | null;
+  kind: "root" | "fork";
+  parentId: number | null;
+  forkedAt: number | null;
+}
+
 export class Catalog {
   readonly db: DatabaseSync;
   readonly uid: string;
@@ -28,6 +39,7 @@ export class Catalog {
     this.db.exec(`PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,name TEXT NOT NULL,cwd TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,thinkingLevel TEXT,createdAt INTEGER NOT NULL,primeSessionId TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS agents(sessionId TEXT NOT NULL,id INTEGER NOT NULL,primeSessionId TEXT NOT NULL,name TEXT,kind TEXT NOT NULL,parentId INTEGER,forkedAt INTEGER,PRIMARY KEY(sessionId,id));
       CREATE TABLE IF NOT EXISTS requests(key TEXT PRIMARY KEY,route TEXT NOT NULL,status INTEGER NOT NULL,body TEXT NOT NULL,createdAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sends(sessionId TEXT NOT NULL,requestId TEXT NOT NULL,submissionId INTEGER NOT NULL,PRIMARY KEY(sessionId,requestId));`);
     const found = this.db.prepare("SELECT value FROM meta WHERE key='device_uid'").get() as { value: string } | undefined;
@@ -62,6 +74,18 @@ export class Catalog {
   }
   archive(id: string) {
     this.db.prepare("UPDATE sessions SET archived=1 WHERE id=?").run(id);
+  }
+
+  agents(sessionId: string): AgentRow[] {
+    return this.db.prepare("SELECT * FROM agents WHERE sessionId=? ORDER BY id").all(sessionId) as unknown as AgentRow[];
+  }
+  /** Takes the next free agent id (2 and up) and stores the row under it. */
+  insertAgent(r: Omit<AgentRow, "id">): AgentRow {
+    const { n } = this.db.prepare("SELECT COALESCE(MAX(id),1)+1 AS n FROM agents WHERE sessionId=?").get(r.sessionId) as { n: number };
+    this.db
+      .prepare("INSERT INTO agents(sessionId,id,primeSessionId,name,kind,parentId,forkedAt) VALUES(?,?,?,?,?,?,?)")
+      .run(r.sessionId, n, r.primeSessionId, r.name, r.kind, r.parentId, r.forkedAt);
+    return { ...r, id: n };
   }
 
   replay(key: string, route: string) {

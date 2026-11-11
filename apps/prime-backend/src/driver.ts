@@ -40,6 +40,8 @@ export interface PrimeDriver {
     model: { provider: string; modelId: string };
     thinkingLevel?: ThinkingLevel;
   }): Promise<{ primeSessionId: string }>;
+  /** Forks the session after dpi entry `entryId` into a session of its own; the source keeps its history and worker. */
+  forkSession(primeSessionId: string, entryId: number): Promise<{ primeSessionId: string }>;
   openSession(primeSessionId: string, cwd: string): Promise<void>; // after a backend restart
   agent(primeSessionId: string): PrimeAgentHandle; // main agent only for v1
   models(): ModelInfo[];

@@ -156,7 +156,6 @@ test("agents: addressing, detail, config, entries, transcript, benign and unsupp
     assert.equal((await b.call("POST", `${base}/tasks/x/abort`, {})).status, 400);
     // everything else
     const nope: [string, string, unknown][] = [
-      ["POST", `${base}/agents/main/fork`, { entryId: 1 }],
       ["POST", `${base}/agents/main/compact`, {}],
       ["POST", `${base}/agents/main/reset`, {}],
       ["PATCH", `${base}/compaction`, { reserveTokens: 2048 }],
@@ -165,7 +164,6 @@ test("agents: addressing, detail, config, entries, transcript, benign and unsupp
       ["POST", `${base}/agents/main/demo/jobs/3/approval`, {}],
       ["DELETE", `${base}/agents/main/inbox/1`, undefined],
       ["GET", `${base}/submissions/1`, undefined],
-      ["POST", `${base}/agents`, {}],
       ["PATCH", `${base}/agents/main`, { name: "x" }],
       ["GET", `${base}/agents/main/docs/demo.job-runs`, undefined],
     ];

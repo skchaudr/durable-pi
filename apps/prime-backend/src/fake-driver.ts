@@ -175,6 +175,16 @@ export class FakeDriver implements PrimeDriver {
     this.agents.set(primeSessionId, new FakeAgent(this, opts.cwd, opts.model, opts.thinkingLevel));
     return { primeSessionId };
   }
+  async forkSession(primeSessionId: string, entryId: number) {
+    const src = this.agent(primeSessionId);
+    if (!src.entries.some((e) => e.id === entryId)) throw invalid(`Prime has no fork point for entry ${entryId}`);
+    const { cwd, model, thinkingLevel } = src.config();
+    const fork = new FakeAgent(this, cwd!, model!, thinkingLevel);
+    fork.entries = src.entries.filter((e) => e.id <= entryId);
+    const forkId = `fake-${randomUUID()}`;
+    this.agents.set(forkId, fork);
+    return { primeSessionId: forkId };
+  }
   async openSession(primeSessionId: string, cwd: string) {
     this.opened.push({ primeSessionId, cwd });
     if (!this.agents.has(primeSessionId))

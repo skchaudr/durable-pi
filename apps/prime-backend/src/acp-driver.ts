@@ -11,6 +11,7 @@ import { launchEnv, primeEnv } from "./prime/env.js";
 import { readDefaultModel, readModels } from "./prime/models.js";
 import { Translator, messagesToEntries } from "./prime/translate.js";
 import * as ext from "./prime/extend.js";
+import { forkPoint } from "./prime/fork.js";
 import { PrimeTasks } from "./prime/tasks.js";
 
 export interface DriverOptions extends ClientOptions {
@@ -275,6 +276,36 @@ export default async function createDriver(_config?: BackendConfig, options: Dri
       const s = new PrimeSession(client, sessionDir, options.env, made.sessionId, cwd, made.sessionFile, track, _config?.dataDir);
       await adopt(s, made.sessionFile, made);
       return { primeSessionId: made.sessionId as string };
+    },
+    async forkSession(primeSessionId, entryId) {
+      const src = sessions.get(primeSessionId);
+      if (!src) throw new ApiFault("not_found", `No Prime session ${primeSessionId}`);
+      if (src.busy()) throw new ApiFault("busy", "The agent is busy; Prime forks only between turns");
+      const at = src.activeId;
+      let forked: any;
+      try {
+        const point = forkPoint(await client.request({ type: "get_session_tree", activeSessionId: at }), src.snapshot().entries, entryId);
+        const { sessionFile: back } = await client.request({ type: "get_state", activeSessionId: at });
+        await client.request({ type: "fork", activeSessionId: at, entryId: point, position: "at" }, 90000);
+        forked = await client.request({ type: "get_state", activeSessionId: at });
+        // `fork` moves the source's worker onto the new file; move it back, then give the fork a worker of its own.
+        await client.request({ type: "switch_session", activeSessionId: at, sessionPath: back }, 90000);
+      } catch (e) {
+        return fault(e);
+      }
+      // The supervisor's roster can still list the source's worker under the fork's file for a moment: create until it is a new one.
+      let made: any;
+      try {
+        for (let i = 0; i < 20 && made?.sessionId !== forked.sessionId; i++) {
+          if (i) await new Promise((r) => setTimeout(r, 100));
+          made = await client.request({ type: "create", lifecycle: "resident", launchEnv: launchEnv(options.env), sessionPath: forked.sessionFile, config: { cwd: forked.cwd, sessionDir } });
+        }
+      } catch (e) {
+        return fault(e);
+      }
+      if (made.sessionId !== forked.sessionId) throw new ApiFault("unavailable", "Prime did not open the forked session");
+      await adopt(new PrimeSession(client, sessionDir, options.env, forked.sessionId, forked.cwd, forked.sessionFile, track, _config?.dataDir), forked.sessionFile, made);
+      return { primeSessionId: forked.sessionId as string };
     },
     async openSession(primeSessionId, cwd) {
       if (sessions.has(primeSessionId)) return;

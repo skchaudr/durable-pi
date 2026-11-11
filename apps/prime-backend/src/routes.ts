@@ -14,6 +14,7 @@ const route = (fn: Async) => (req: Request, res: Response, next: NextFunction) =
 interface Locals {
   row: SessionRow;
   h: PrimeAgentHandle;
+  id: number;
 }
 
 const param = (req: Request, key: string) => String(req.params[key]);
@@ -95,9 +96,9 @@ export function v1(svc: Service) {
 
   // ---------------------------------------------------------- agents
   r.get("/sessions/:s/agents", (_req, res) => res.json(svc.agents(L(res).row)));
-  r.post("/sessions/:s/agents", unsupported);
+  r.post("/sessions/:s/agents", create, route(async (req, res) => res.status(201).json(await svc.createAgent(L(res).row, req.body ?? {}))));
   const a = "/sessions/:s/agents/:a";
-  r.get(a, route(async (_req, res) => res.json(await svc.agentDetail(L(res).row))));
+  r.get(a, route(async (_req, res) => res.json(await svc.agentDetail(L(res).row, L(res).id))));
   r.patch(a, unsupported);
   r.get(`${a}/events`, (req, res, next) => {
     try {
@@ -108,22 +109,22 @@ export function v1(svc: Service) {
   });
   r.get(`${a}/entries`, (req, res) => {
     const scope = String(req.query.scope ?? "all");
-    if (scope === "active") return void res.json({ items: svc.activeEntries(L(res).row) });
-    res.json(svc.entries(L(res).row, req.query.cursor as string | undefined, Number(req.query.limit ?? 500)));
+    if (scope === "active") return void res.json({ items: svc.activeEntries(L(res).row, L(res).id) });
+    res.json(svc.entries(L(res).row, req.query.cursor as string | undefined, Number(req.query.limit ?? 500), L(res).id));
   });
-  r.get(`${a}/transcript`, (req, res) => res.json(svc.transcript(L(res).row, String(req.query.format ?? "json"))));
+  r.get(`${a}/transcript`, (req, res) => res.json(svc.transcript(L(res).row, String(req.query.format ?? "json"), L(res).id)));
   r.post(
     `${a}/messages`,
     route(async (req, res) => {
-      const { id } = await svc.send(L(res).row, req.body ?? {});
+      const { id } = await svc.send(L(res).row, req.body ?? {}, L(res).id);
       res.status(202).json({ submissionId: id, status: "queued" });
     }),
   );
   r.delete(`${a}/inbox/:submissionId`, unsupported);
-  r.post(`${a}/abort`, route(async (req, res) => res.json(await svc.abort(L(res).row, req.body?.background === true))));
-  r.post(`${a}/fork`, unsupported);
+  r.post(`${a}/abort`, route(async (req, res) => res.json(await svc.abort(L(res).row, req.body?.background === true, L(res).id))));
+  r.post(`${a}/fork`, create, route(async (req, res) => res.status(201).json(await svc.fork(L(res).row, L(res).id, req.body ?? {}))));
   r.get(`${a}/config`, (_req, res) => res.json(L(res).h.config()));
-  r.patch(`${a}/config`, route(async (req, res) => res.json(await svc.configure(L(res).row, req.body ?? {}))));
+  r.patch(`${a}/config`, route(async (req, res) => res.json(await svc.configure(L(res).row, req.body ?? {}, L(res).id))));
   r.get(`${a}/extensions`, route(async (_req, res) => res.json(await L(res).h.extensions())));
   r.patch(`${a}/extensions`, route(async (req, res) => res.json(await L(res).h.patchExtensions(req.body ?? {}))));
   r.post(`${a}/compact`, unsupported);

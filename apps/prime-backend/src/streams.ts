@@ -62,10 +62,10 @@ export function sessionStream(svc: Service, row: SessionRow, res: Response) {
   });
 }
 
-export function agentStream(_svc: Service, target: { row: SessionRow; h: PrimeAgentHandle }, req: Request, res: Response) {
-  const { row, h } = target;
+export function agentStream(_svc: Service, target: { row: SessionRow; h: PrimeAgentHandle; id: number }, req: Request, res: Response) {
+  const { row, h, id } = target;
   const docs = parseDocs(req.query.docs, AGENT_DOC_KINDS);
-  const sse = openSse(res, { kind: "agent", sessionId: row.id, agentId: 1 });
+  const sse = openSse(res, { kind: "agent", sessionId: row.id, agentId: id });
   // Snapshot and subscription happen in one synchronous run, so no batch falls between them.
   const snapshot = JSON.parse(JSON.stringify(h.snapshot()));
   const off = h.subscribe((events) => {
