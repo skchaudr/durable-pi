@@ -22,7 +22,7 @@ import { agentDbPath, repoDir, worktreesDir } from "../../../shared/paths.ts";
 import { lockFile } from "../../../shared/lock.ts";
 import type { Deploy, Incident } from "../../../shared/types.ts";
 import { config } from "./config.ts";
-import { Deploys, Incidents, createExtensions, logLine } from "./extensions.ts";
+import { Codemode, Deploys, Incidents, closeCodemodeSandbox, createExtensions, logLine } from "./extensions.ts";
 import { curatedModels } from "./model-catalog.ts";
 import { ensureWorktree } from "./repo.ts";
 import type { Voice } from "./voice.ts";
@@ -119,7 +119,7 @@ export class Ops extends EventEmitter {
         agent: {
           model: { provider: PROVIDER, modelId: config.model },
           thinkingLevel: config.thinking,
-          extensions: [extensions.OpsTools, extensions.Desk],
+          extensions: [extensions.OpsTools, extensions.Desk, Codemode],
           cwd: repoDir,
         },
       });
@@ -167,7 +167,7 @@ export class Ops extends EventEmitter {
       await configure(tx, conversation.id, {
         model: { provider: PROVIDER, modelId: config.model },
         thinkingLevel: config.thinking,
-        extensions: [CodingTools, this.extensions.OpsTools, this.extensions.IncidentAgent],
+        extensions: [CodingTools, this.extensions.OpsTools, this.extensions.IncidentAgent, Codemode],
         cwd: worktree,
         instructions: `You own ${id}: ${title}. Your worktree is ${worktree}, on branch ${branch}.`,
       });
@@ -344,6 +344,7 @@ Your worktree ${incident.worktree} is checkout-api on branch ${incident.branch},
     try {
       await this.harness.close(ctx);
     } finally {
+      await closeCodemodeSandbox();
       this.unlock();
     }
   }

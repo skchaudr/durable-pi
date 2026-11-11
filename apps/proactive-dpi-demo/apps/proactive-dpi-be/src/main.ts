@@ -88,7 +88,7 @@ app.get("/api/config", (_req, res) => {
       windowSeconds: config.windowMs / 1000,
     },
     repo: repoDir,
-    version: "1.0.3",
+    version: "1.3.0",
   });
 });
 
