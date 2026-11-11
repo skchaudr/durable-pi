@@ -185,3 +185,29 @@ describe("messagesToEntries", () => {
     assert.deepEqual(messagesToEntries([userMsg]).map((e) => e.id), [1]);
   });
 });
+
+describe("revival events", () => {
+  it("live events and history rows become one chat line each", () => {
+    const t = new Translator({ entries: [], agent: {} });
+    const live = t.apply({
+      type: "revival_continued",
+      interruptedToolCalls: [{ toolCallId: "c1", toolName: "python_repl", started: true }],
+      at: "2026-11-11T15:17:14.063Z",
+    });
+    assert.equal(live.length, 1);
+    const ev = live[0] as Extract<WireAgentEvent, { type: "entry_appended" }>;
+    assert.equal(ev.type, "entry_appended");
+    assert.equal(ev.entry.kind, "prime.revival");
+    assert.equal((ev.entry.data as { text: string }).text, "Turn continued after a restart. Interrupted: python_repl (may have partly run).");
+    assert.equal(t.snapshot().entries.length, 1);
+
+    const rows = messagesToEntries([
+      { role: "custom", customType: "revival_event", display: true, details: { type: "revival", outcome: "skipped", reason: "its busy evidence is stale", restarts: 0 } },
+      { role: "custom", customType: "revival_event", details: { type: "worker_restarted", failure: 2, maxFailures: 5 } },
+    ]);
+    assert.deepEqual(rows.map((r) => [r.kind, (r.data as { text: string }).text]), [
+      ["prime.revival", "Prime did not revive this session: its busy evidence is stale"],
+      ["prime.revival", "Session worker crashed and was restarted (2/5)."],
+    ]);
+  });
+});

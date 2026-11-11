@@ -26,12 +26,23 @@ const KINDS: Record<string, string> = {
 const kindOf = (role: string) => KINDS[role] ?? `pi.${role}`;
 
 export function messagesToEntries(primeMessages: unknown[], firstId = 1): WireEntry[] {
-  return primeMessages.map((m, i) => ({
-    id: firstId + i,
-    conversationId: 1,
-    kind: kindOf((m as J)?.role),
-    model: [m as WireMessage],
-  }));
+  return primeMessages.map((m, i) => {
+    const r = m as J;
+    if (r?.role === "custom" && r.customType === "revival_event")
+      return { id: firstId + i, conversationId: 1, kind: REVIVAL_KIND, data: { text: revivalText(r.details ?? {}), event: r.details } };
+    return { id: firstId + i, conversationId: 1, kind: kindOf(r?.role), model: [m as WireMessage] };
+  });
+}
+
+/** Prime's crash-recovery events (daemon revival_event.rs): one chat line each, live and from history. */
+const REVIVAL_KIND = "prime.revival";
+export function revivalText(e: J): string {
+  if (e.type === "worker_restarted") return `Session worker crashed and was restarted (${e.failure}/${e.maxFailures}).`;
+  if (e.type === "revival")
+    return e.outcome === "skipped" ? `Prime did not revive this session: ${e.reason ?? "no reason given"}` : "Prime revived this session after a crash.";
+  const calls: J[] = Array.isArray(e.interruptedToolCalls) ? e.interruptedToolCalls : [];
+  const list = calls.map((c) => `${c.toolName} (${c.started ? "may have partly run" : "never started"})`).join(", ");
+  return list ? `Turn continued after a restart. Interrupted: ${list}.` : "Turn continued after a restart.";
 }
 
 /** Text of a tool result (`{content:[{type:"text",text}]}`): Prime's partialResult is the whole output so far. */
@@ -237,6 +248,14 @@ export class Translator {
         if (this.compaction) out.push({ type: "compaction_end", taskId: this.compaction.taskId, reason: this.compaction.reason });
         this.compaction = undefined;
         break;
+      case "revival":
+      case "revival_continued":
+      case "worker_restarted": {
+        const entry: WireEntry = { id: this.nextId++, conversationId: 1, kind: REVIVAL_KIND, data: { text: revivalText(e), event: e } };
+        this.entries.push(entry);
+        out.push({ type: "entry_appended", entry });
+        break;
+      }
       // tool_execution_progress (elapsedMs), goal_update, rlm_child_update and anything unknown: no dpi counterpart.
       default:
         break;
