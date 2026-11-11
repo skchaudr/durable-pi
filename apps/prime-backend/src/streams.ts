@@ -62,12 +62,12 @@ export function sessionStream(svc: Service, row: SessionRow, res: Response) {
   });
 }
 
-export async function agentStream(_svc: Service, target: { row: SessionRow; h: PrimeAgentHandle; child?: PrimeChild }, req: Request, res: Response) {
-  const { row, h, child } = target;
+export async function agentStream(_svc: Service, target: { row: SessionRow; h: PrimeAgentHandle; id: number; child?: PrimeChild }, req: Request, res: Response) {
+  const { row, h, id, child } = target;
   const docs = parseDocs(req.query.docs, AGENT_DOC_KINDS);
   // A child is read from Prime once, before the stream opens (so a failure is a plain 400); it has no live feed.
   const read = child ? await h.childSnapshot(child.id) : undefined;
-  const sse = openSse(res, { kind: "agent", sessionId: row.id, agentId: child?.agentId ?? 1 });
+  const sse = openSse(res, { kind: "agent", sessionId: row.id, agentId: id });
   // Snapshot and subscription happen in one synchronous run, so no batch falls between them.
   const snapshot = JSON.parse(JSON.stringify(read ?? h.snapshot()));
   const off = child ? () => {} : h.subscribe((events) => {

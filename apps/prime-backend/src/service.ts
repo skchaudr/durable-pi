@@ -20,14 +20,16 @@ import type {
 } from "../../dpi-sdk/src/api.js";
 import { THINKING_LEVELS } from "../../dpi-sdk/src/api.js";
 import { lastAssistantText, toMarkdown, toTranscript } from "../../dpi-sdk/src/transcript.js";
-import { Catalog, type SessionRow } from "./catalog.js";
+import { Catalog, type AgentRow, type SessionRow } from "./catalog.js";
 import type { PrimeAgentHandle, PrimeChild, PrimeDriver } from "./driver.js";
 import { ApiFault, invalid, notFound } from "./errors.js";
 
 export const DEVICE_DOC_KINDS = ["app.shared-state"];
 export const AGENT_DOC_KINDS = ["demo.job-runs", "demo.workspace"];
-/** The only agent a Prime session has in v1. */
+/** The session's own Prime session; agents made with `POST .../agents` and `.../fork` are rows in the catalog. */
 export const MAIN_AGENT = 1;
+/** `handles`, `errors` and `unsubs` key the root agent by the session id and any other agent by `session:agent`. */
+const key = (sessionId: string, agent = MAIN_AGENT) => (agent === MAIN_AGENT ? sessionId : `${sessionId}:${agent}`);
 
 export interface ServiceOptions {
   dataDir: string;
@@ -71,6 +73,15 @@ export class Service {
         svc.attach(row);
       } catch (e) {
         svc.errors.set(row.id, String(e instanceof Error ? e.message : e));
+        continue;
+      }
+      for (const a of svc.catalog.agents(row.id)) {
+        try {
+          await driver.openSession(a.primeSessionId, row.cwd);
+          svc.attach(row, a.id, a.primeSessionId);
+        } catch (e) {
+          svc.errors.set(key(row.id, a.id), String(e instanceof Error ? e.message : e));
+        }
       }
     }
     return svc;
@@ -93,16 +104,17 @@ export class Service {
     for (const fn of this.listeners) fn();
   };
 
-  private attach(row: SessionRow) {
-    const handle = this.driver.agent(row.primeSessionId);
-    this.handles.set(row.id, handle);
-    this.errors.delete(row.id);
+  private attach(row: SessionRow, agent = MAIN_AGENT, primeSessionId = row.primeSessionId) {
+    const k = key(row.id, agent);
+    const handle = this.driver.agent(primeSessionId);
+    this.handles.set(k, handle);
+    this.errors.delete(k);
     // Busy flips and resets change the tree; everything else is for the agent stream only.
     const offEvents = handle.subscribe((events) => {
       if (events.some((e) => e.type === "run_start" || e.type === "run_end" || e.type === "snapshot")) this.notify();
     });
     const offChildren = handle.onChildren(this.notify);
-    this.unsubs.set(row.id, () => {
+    this.unsubs.set(k, () => {
       offEvents();
       offChildren();
     });
@@ -185,9 +197,9 @@ export class Service {
     throw notFound(`No session "${ref}" on ${this.name}`);
   }
 
-  handle(row: SessionRow): PrimeAgentHandle {
-    const h = this.handles.get(row.id);
-    if (!h) throw new ApiFault("unavailable", this.errors.get(row.id) ?? `Session ${row.name} is unavailable`);
+  handle(row: SessionRow, agent = MAIN_AGENT): PrimeAgentHandle {
+    const h = this.handles.get(key(row.id, agent));
+    if (!h) throw new ApiFault("unavailable", this.errors.get(key(row.id, agent)) ?? `Session ${row.name} is unavailable`);
     return h;
   }
 
@@ -232,12 +244,14 @@ export class Service {
 
   /** Stops the agent and hides the session; the catalog row stays, marked archived. */
   async archive(row: SessionRow) {
-    const h = this.handles.get(row.id);
-    if (h) await h.abort().catch(() => {});
-    this.unsubs.get(row.id)?.();
-    this.unsubs.delete(row.id);
-    this.handles.delete(row.id);
-    this.errors.delete(row.id);
+    for (const [k, h] of this.handles) {
+      if (k !== row.id && !k.startsWith(`${row.id}:`)) continue;
+      await h.abort().catch(() => {});
+      this.unsubs.get(k)?.();
+      this.unsubs.delete(k);
+      this.handles.delete(k);
+      this.errors.delete(k);
+    }
     this.catalog.archive(row.id);
     this.notify();
     return { archived: row.id };
@@ -266,32 +280,85 @@ export class Service {
   /** The main agent, then Prime's child agents as subagents it owns. */
   agents(row: SessionRow): AgentSummary[] {
     const h = this.handle(row);
+    const others = this.catalog.agents(row.id).map((a) => ({
+      id: a.id,
+      name: a.name ?? `${a.kind === "fork" ? "Fork" : "Root"} #${a.id}`,
+      named: a.name !== null,
+      kind: a.kind,
+      ...(a.parentId !== null ? { parentId: a.parentId, forkedAt: a.forkedAt ?? undefined } : {}),
+      busy: this.handles.get(key(row.id, a.id))?.busy() ?? false,
+      background: 0,
+    }));
     const kids = h.children().map((c): AgentSummary => ({ id: c.agentId, name: c.name, named: false, kind: "subagent", ownerAgentId: MAIN_AGENT, busy: c.status === "running", background: 0 }));
-    return [{ id: MAIN_AGENT, name: "Main", named: false, kind: "root", busy: h.busy(), background: 0 }, ...kids];
+    return [{ id: MAIN_AGENT, name: "Main", named: false, kind: "root", busy: h.busy(), background: 0 }, ...others, ...kids];
   }
 
-  /** Agent `1`, `main` or the name `Main`; or one of Prime's child agents by its agent id (`child` is set then). */
-  resolveAgent(sessionRef: string, agentRef: string): { row: SessionRow; h: PrimeAgentHandle; child?: PrimeChild } {
+  /** Agent by numeric id, `main` or unique name (custom or derived, case-insensitive). A Prime child agent answers with `child` set and the main handle. */
+  resolveAgent(sessionRef: string, agentRef: string): { row: SessionRow; id: number; h: PrimeAgentHandle; child?: PrimeChild } {
     const row = this.resolveSession(sessionRef);
-    const h = this.handle(row);
-    const ref = agentRef.toLowerCase();
-    if (agentRef === String(MAIN_AGENT) || ref === "main") return { row, h };
-    const child = h.children().find((c) => String(c.agentId) === agentRef);
-    if (!child) throw notFound(`No agent "${agentRef}" in session ${row.name}`);
-    return { row, h, child };
+    this.handle(row);
+    const agents = this.agents(row);
+    const found = /^\d+$/.test(agentRef)
+      ? agents.filter((a) => a.id === Number(agentRef))
+      : agents.filter((a) => a.name.toLowerCase() === agentRef.toLowerCase());
+    if (found.length > 1) throw new ApiFault("ambiguous", `${found.length} agents are named "${agentRef}"`);
+    if (!found.length) throw notFound(`No agent "${agentRef}" in session ${row.name}`);
+    const id = found[0].id;
+    const child = this.handle(row).children().find((c) => c.agentId === id);
+    return { row, id, h: this.handle(row, child ? MAIN_AGENT : id), ...(child ? { child } : {}) };
   }
 
-  agentSummary(row: SessionRow): AgentSummary {
-    return this.agents(row)[0];
+  agentSummary(row: SessionRow, agent = MAIN_AGENT): AgentSummary {
+    return this.agents(row).find((a) => a.id === agent)!;
   }
 
-  async agentDetail(row: SessionRow, child?: PrimeChild): Promise<AgentDetail> {
-    const h = this.handle(row);
-    if (child) return { ...this.agents(row).find((a) => a.id === child.agentId)!, sessionId: row.id, config: {}, tools: [], extensions: [] };
-    return { ...this.agentSummary(row), sessionId: row.id, config: h.config(), tools: await h.tools(), extensions: [] };
+  async agentDetail(row: SessionRow, agent = MAIN_AGENT, child?: PrimeChild): Promise<AgentDetail> {
+    const base = { ...this.agentSummary(row, agent), sessionId: row.id };
+    if (child) return { ...base, config: {}, tools: [], extensions: [] };
+    const h = this.handle(row, agent);
+    return { ...base, config: h.config(), tools: await h.tools(), extensions: [] };
   }
 
-  async configure(row: SessionRow, body: Record<string, unknown>): Promise<AgentConfig> {
+  /** Stores and attaches an agent whose Prime session already exists, then answers with its summary. */
+  private addAgent(row: SessionRow, a: Omit<AgentRow, "sessionId" | "id">) {
+    const stored = this.catalog.insertAgent({ sessionId: row.id, ...a });
+    this.attach(row, stored.id, a.primeSessionId);
+    this.notify();
+    return this.agentSummary(row, stored.id);
+  }
+
+  /** dpi's rule for agent names: no numbers, and not "main". */
+  private agentName(name: unknown): string | null {
+    if (typeof name !== "string" || !name.trim()) return null;
+    const clean = name.trim().slice(0, 100);
+    if (/^\d+$/.test(clean) || clean.toLowerCase() === "main") throw invalid("Agent names cannot be numbers or 'main'");
+    return clean;
+  }
+
+  /** A new Prime session with the model, thinking level and folder of `from` (default: Main). */
+  async createAgent(row: SessionRow, body: { from?: unknown; name?: unknown }) {
+    const name = this.agentName(body.name);
+    const cfg = this.resolveAgent(row.id, String(body.from ?? MAIN_AGENT)).h.config();
+    const { primeSessionId } = await this.driver.createSession({
+      cwd: cfg.cwd ?? row.cwd,
+      model: cfg.model ?? { provider: row.provider, modelId: row.model },
+      thinkingLevel: cfg.thinkingLevel,
+    });
+    return this.addAgent(row, { primeSessionId, name, kind: "root", parentId: null, forkedAt: null });
+  }
+
+  /** A new Prime session holding the history of `agent` up to and including entry `body.entryId`. */
+  async fork(row: SessionRow, agent: number, body: { entryId?: unknown; name?: unknown }) {
+    const at = Number(body.entryId);
+    if (!Number.isSafeInteger(at)) throw invalid("entryId is required");
+    if (body.name !== undefined && typeof body.name !== "string") throw invalid("Invalid fork name");
+    const name = this.agentName(body.name);
+    const source = agent === MAIN_AGENT ? row.primeSessionId : this.catalog.agents(row.id).find((a) => a.id === agent)!.primeSessionId;
+    const { primeSessionId } = await this.driver.forkSession(source, at);
+    return this.addAgent(row, { primeSessionId, name, kind: "fork", parentId: agent, forkedAt: at });
+  }
+
+  async configure(row: SessionRow, body: Record<string, unknown>, agent = MAIN_AGENT): Promise<AgentConfig> {
     const patch: Partial<AgentConfig> = {};
     if (body.model !== undefined) patch.model = this.validateModel(body.model);
     if (body.thinkingLevel !== undefined) {
@@ -310,9 +377,9 @@ export class Service {
       if (typeof body.readOnly !== "boolean") throw invalid("readOnly must be a boolean");
       patch.readOnly = body.readOnly;
     }
-    const config = await this.handle(row).setConfig(patch);
-    if (patch.model) this.catalog.setModel(row.id, patch.model.provider, patch.model.modelId);
-    if (patch.thinkingLevel) this.catalog.setThinking(row.id, patch.thinkingLevel);
+    const config = await this.handle(row, agent).setConfig(patch);
+    if (agent === MAIN_AGENT && patch.model) this.catalog.setModel(row.id, patch.model.provider, patch.model.modelId);
+    if (agent === MAIN_AGENT && patch.thinkingLevel) this.catalog.setThinking(row.id, patch.thinkingLevel);
     this.notify();
     return config;
   }
@@ -327,35 +394,36 @@ export class Service {
   }
 
   /** Dedupes on `requestId` (also across restarts); the driver sees each request once. */
-  async send(row: SessionRow, body: Record<string, unknown>) {
+  async send(row: SessionRow, body: Record<string, unknown>, agent = MAIN_AGENT) {
     if (typeof body.content !== "string" || !body.content.trim() || body.content.length > 100000)
       throw invalid("content must be a message under 100,000 characters");
     const whenBusy = (body.whenBusy ?? "followUp") as WhenBusy;
     if (!["steer", "followUp", "reject"].includes(whenBusy)) throw invalid("whenBusy must be followUp, steer or reject");
     if (typeof body.requestId !== "string" || !body.requestId || body.requestId.length > 128)
       throw invalid("requestId is required (≤128 chars) so retries never submit twice");
-    const key = `${row.id}\n${body.requestId}`;
-    const pending = this.sending.get(key);
+    const scope = key(row.id, agent);
+    const sending = `${scope}\n${body.requestId}`;
+    const pending = this.sending.get(sending);
     if (pending) return { id: await pending };
-    const known = this.catalog.sendLookup(row.id, body.requestId);
+    const known = this.catalog.sendLookup(scope, body.requestId);
     if (known !== undefined) return { id: known };
-    const h = this.handle(row);
+    const h = this.handle(row, agent);
     if (whenBusy === "reject" && h.busy()) throw new ApiFault("busy", "The agent is busy and the input asked to be rejected while busy");
     const run = h.send(body.content, whenBusy).then(({ submissionId }) => {
-      this.catalog.sendRecord(row.id, body.requestId as string, submissionId);
+      this.catalog.sendRecord(scope, body.requestId as string, submissionId);
       return submissionId;
     });
-    this.sending.set(key, run);
+    this.sending.set(sending, run);
     try {
       return { id: await run };
     } finally {
-      this.sending.delete(key);
+      this.sending.delete(sending);
     }
   }
 
   /** background: dpi's "Stop all", which also stops background runs: on Prime, its schedules, heartbeats and goal. */
-  async abort(row: SessionRow, background = false) {
-    const h = this.handle(row);
+  async abort(row: SessionRow, background = false, agent = MAIN_AGENT) {
+    const h = this.handle(row, agent);
     await h.abort();
     if (background) {
       const t = h.tasks();
@@ -364,10 +432,9 @@ export class Service {
     return { ok: true as const };
   }
 
-  /** The main agent's live entries, or a child's as Prime holds them now. */
-  async agentEntries(row: SessionRow, child?: PrimeChild): Promise<readonly WireEntry[]> {
-    const h = this.handle(row);
-    return child ? (await h.childSnapshot(child.id)).entries : h.snapshot().entries;
+  /** An agent's live entries, or a Prime child's as Prime holds them now. */
+  async agentEntries(row: SessionRow, agent = MAIN_AGENT, child?: PrimeChild): Promise<readonly WireEntry[]> {
+    return child ? (await this.handle(row).childSnapshot(child.id)).entries : this.handle(row, agent).snapshot().entries;
   }
 
   entries(source: readonly WireEntry[], cursor: string | undefined, limit: number): Page<WireEntry> {

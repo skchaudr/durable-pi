@@ -13,6 +13,9 @@ import type {
   WireSnapshotEvent,
 } from "../../dpi-sdk/src/api.js";
 
+/** Child agents are numbered from here; the catalog hands out the ids below it (2, 3, ...) to created and forked agents. */
+export const CHILD_AGENT_BASE = 1000;
+
 /** One of Prime's child agents (RLM children) of a session. `agentId` is its place in the dpi tree; the main agent is 1. */
 export interface PrimeChild {
   agentId: number;
@@ -59,6 +62,8 @@ export interface PrimeDriver {
     model: { provider: string; modelId: string };
     thinkingLevel?: ThinkingLevel;
   }): Promise<{ primeSessionId: string }>;
+  /** Forks the session after dpi entry `entryId` into a session of its own; the source keeps its history and worker. */
+  forkSession(primeSessionId: string, entryId: number): Promise<{ primeSessionId: string }>;
   openSession(primeSessionId: string, cwd: string): Promise<void>; // after a backend restart
   agent(primeSessionId: string): PrimeAgentHandle; // main agent only for v1
   models(): ModelInfo[];

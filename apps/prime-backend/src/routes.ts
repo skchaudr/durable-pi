@@ -16,6 +16,7 @@ interface Locals {
   h: PrimeAgentHandle;
   /** Set when the agent is one of Prime's child agents. */
   child?: PrimeChild;
+  id: number;
 }
 
 // What Prime can serve for a child agent: its summary, transcript and entries, read-only. Everything else is a 400.
@@ -103,29 +104,29 @@ export function v1(svc: Service) {
 
   // ---------------------------------------------------------- agents
   r.get("/sessions/:s/agents", (_req, res) => res.json(svc.agents(L(res).row)));
-  r.post("/sessions/:s/agents", unsupported);
+  r.post("/sessions/:s/agents", create, route(async (req, res) => res.status(201).json(await svc.createAgent(L(res).row, req.body ?? {}))));
   const a = "/sessions/:s/agents/:a";
-  r.get(a, route(async (_req, res) => res.json(await svc.agentDetail(L(res).row, L(res).child))));
+  r.get(a, route(async (_req, res) => res.json(await svc.agentDetail(L(res).row, L(res).id, L(res).child))));
   r.patch(a, unsupported);
   r.get(`${a}/events`, route((req, res) => agentStream(svc, L(res), req, res)));
   r.get(`${a}/entries`, route(async (req, res) => {
-    const source = await svc.agentEntries(L(res).row, L(res).child);
+    const source = await svc.agentEntries(L(res).row, L(res).id, L(res).child);
     if (String(req.query.scope ?? "all") === "active") return void res.json({ items: JSON.parse(JSON.stringify(source)) });
     res.json(svc.entries(source, req.query.cursor as string | undefined, Number(req.query.limit ?? 500)));
   }));
-  r.get(`${a}/transcript`, route(async (req, res) => res.json(svc.transcript(await svc.agentEntries(L(res).row, L(res).child), String(req.query.format ?? "json")))));
+  r.get(`${a}/transcript`, route(async (req, res) => res.json(svc.transcript(await svc.agentEntries(L(res).row, L(res).id, L(res).child), String(req.query.format ?? "json")))));
   r.post(
     `${a}/messages`,
     route(async (req, res) => {
-      const { id } = await svc.send(L(res).row, req.body ?? {});
+      const { id } = await svc.send(L(res).row, req.body ?? {}, L(res).id);
       res.status(202).json({ submissionId: id, status: "queued" });
     }),
   );
   r.delete(`${a}/inbox/:submissionId`, unsupported);
-  r.post(`${a}/abort`, route(async (req, res) => res.json(await svc.abort(L(res).row, req.body?.background === true))));
-  r.post(`${a}/fork`, unsupported);
+  r.post(`${a}/abort`, route(async (req, res) => res.json(await svc.abort(L(res).row, req.body?.background === true, L(res).id))));
+  r.post(`${a}/fork`, create, route(async (req, res) => res.status(201).json(await svc.fork(L(res).row, L(res).id, req.body ?? {}))));
   r.get(`${a}/config`, (_req, res) => res.json(L(res).h.config()));
-  r.patch(`${a}/config`, route(async (req, res) => res.json(await svc.configure(L(res).row, req.body ?? {}))));
+  r.patch(`${a}/config`, route(async (req, res) => res.json(await svc.configure(L(res).row, req.body ?? {}, L(res).id))));
   r.get(`${a}/extensions`, route(async (_req, res) => res.json(await L(res).h.extensions())));
   r.patch(`${a}/extensions`, route(async (req, res) => res.json(await L(res).h.patchExtensions(req.body ?? {}))));
   r.post(`${a}/compact`, route(async (req, res) => res.json(await L(res).h.compact(typeof req.body?.instructions === "string" && req.body.instructions.trim() ? req.body.instructions : undefined))));

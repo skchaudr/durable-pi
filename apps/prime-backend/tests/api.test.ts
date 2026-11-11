@@ -157,12 +157,10 @@ test("agents: addressing, detail, config, entries, transcript, benign and unsupp
     assert.equal((await b.call("POST", `${base}/tasks/x/abort`, {})).status, 400);
     // everything else
     const nope: [string, string, unknown][] = [
-      ["POST", `${base}/agents/main/fork`, { entryId: 1 }],
       ["POST", `${base}/agents/main/demo/state`, {}],
       ["POST", `${base}/agents/main/demo/jobs/3/approval`, {}],
       ["DELETE", `${base}/agents/main/inbox/1`, undefined],
       ["GET", `${base}/submissions/1`, undefined],
-      ["POST", `${base}/agents`, {}],
       ["PATCH", `${base}/agents/main`, { name: "x" }],
       ["GET", `${base}/agents/main/docs/demo.job-runs`, undefined],
     ];
@@ -254,36 +252,43 @@ test("Prime child agents: subagents in the tree and agents list, read-only agent
     const main = b.driver.agent([...b.driver.agents.keys()][0]);
     const frames = b.tail("/v1/events");
     await frames.waitFor((f) => f.type === "tree", "first tree");
-    main.kids = [{ agentId: 2, id: "child-1", name: "worker-a", status: "running" }];
+    main.kids = [{ agentId: 1000, id: "child-1", name: "worker-a", status: "running" }];
     main.childEntries.set("child-1", [{ id: 1, conversationId: 1, kind: "pi.user", model: [{ role: "user", content: "child task", timestamp: 1 }] }]);
     main.emitChildren();
     const withKid = await frames.waitFor((f) => f.type === "tree" && f.tree.sessions[0].agents.length === 2, "tree with the child");
     const kid = (withKid as Extract<Frame, { type: "tree" }>).tree.sessions[0].agents[1];
-    assert.deepEqual(kid, { id: 2, name: "worker-a", named: false, kind: "subagent", ownerAgentId: 1, busy: true, background: 0 });
+    assert.deepEqual(kid, { id: 1000, name: "worker-a", named: false, kind: "subagent", ownerAgentId: 1, busy: true, background: 0 });
     assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents`)).body.length, 2);
     assert.equal((await b.call("GET", `/v1/sessions/${s.id}`)).body.busy, true);
 
-    const detail = await b.call("GET", `/v1/sessions/${s.id}/agents/2`);
+    const detail = await b.call("GET", `/v1/sessions/${s.id}/agents/1000`);
     assert.equal(detail.status, 200);
-    assert.deepEqual([detail.body.id, detail.body.kind, detail.body.sessionId], [2, "subagent", s.id]);
-    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/2/entries`)).body.items[0].model[0].content, "child task");
-    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/2/entries?scope=active`)).body.items.length, 1);
-    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/2/transcript`)).status, 200);
-    const stream = b.tail(`/v1/sessions/${s.id}/agents/2/events`);
+    assert.deepEqual([detail.body.id, detail.body.kind, detail.body.sessionId], [1000, "subagent", s.id]);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/1000/entries`)).body.items[0].model[0].content, "child task");
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/1000/entries?scope=active`)).body.items.length, 1);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/1000/transcript`)).status, 200);
+    const stream = b.tail(`/v1/sessions/${s.id}/agents/1000/events`);
     const snap = await stream.waitFor((f) => f.type === "snapshot", "child snapshot");
     assert.equal((snap as Extract<Frame, { type: "snapshot" }>).snapshot.entries.length, 1);
 
     for (const [method, path] of [["POST", "messages"], ["POST", "abort"], ["GET", "config"], ["PATCH", "config"], ["GET", "extensions"], ["POST", "fork"], ["PATCH", ""]]) {
-      const r = await b.call(method, `/v1/sessions/${s.id}/agents/2${path && `/${path}`}`, method === "GET" ? undefined : {});
+      const r = await b.call(method, `/v1/sessions/${s.id}/agents/1000${path && `/${path}`}`, method === "GET" ? undefined : {});
       assert.equal(r.status, 400, `${method} ${path}`);
       assert.equal(r.body.error.code, "invalid");
       assert.match(r.body.error.message, /child agents are read-only/);
     }
     assert.equal(main.sends.length, 0);
-    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/9`)).status, 404);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/9999`)).status, 404);
+
+    // created agents take catalog ids (2, 3, ...), children 1000 and up: no clash, whichever came first
+    const made = await b.call("POST", `/v1/sessions/${s.id}/agents`, { name: "side" });
+    assert.equal(made.status, 201);
+    assert.deepEqual((await b.call("GET", `/v1/sessions/${s.id}/agents`)).body.map((a: { id: number }) => a.id), [1, 2, 1000]);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/side`)).body.kind, "root");
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/worker-a`)).body.kind, "subagent");
 
     main.childEntries.clear(); // Prime cannot read a child whose session is gone
-    const gone = await b.call("GET", `/v1/sessions/${s.id}/agents/2/entries`);
+    const gone = await b.call("GET", `/v1/sessions/${s.id}/agents/1000/entries`);
     assert.equal(gone.status, 400);
     assert.match(gone.body.error.message, /no live session for child child-1/);
     frames.stop();

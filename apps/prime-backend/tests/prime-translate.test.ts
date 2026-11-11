@@ -221,14 +221,14 @@ describe("rlm child agents", () => {
   // A later update may carry only id/status/error (crates/pa-daemon/src/acp/wire_events.rs:731-737).
   const started = { type: "rlm_child_update", child: { id: "child-1", activeSessionId: "live-1", sessionName: "worker-a", label: "run the lane task", status: "running", durationMs: 500, sessionDir: "/s/child-1" } };
 
-  it("lists each child once as a subagent id from 2, merging later updates; no wire event goes out", () => {
+  it("lists each child once as a subagent from CHILD_AGENT_BASE, merging later updates; no wire event goes out", () => {
     const t = new Translator({ entries: [], agent: {} });
     assert.deepEqual(t.apply(started), []);
     t.apply({ type: "rlm_child_update", child: { id: "child-2", status: "running", label: "second task" } });
     t.apply({ type: "rlm_child_update", child: { id: "child-1", status: "done" } });
     assert.deepEqual(t.children(), [
-      { agentId: 2, id: "child-1", name: "worker-a", status: "done" },
-      { agentId: 3, id: "child-2", name: "second task", status: "running" },
+      { agentId: 1000, id: "child-1", name: "worker-a", status: "done" },
+      { agentId: 1001, id: "child-2", name: "second task", status: "running" },
     ]);
     assert.equal(t.childRow("child-1")?.activeSessionId, "live-1"); // kept through the status-only update
   });
@@ -239,6 +239,6 @@ describe("rlm child agents", () => {
     t.apply({ type: "rlm_child_update", child: { status: "running" } });
     assert.deepEqual(t.children(), []);
     t.setChild(started.child);
-    assert.deepEqual(t.children().map((c) => [c.agentId, c.status]), [[2, "running"]]);
+    assert.deepEqual(t.children().map((c) => [c.agentId, c.status]), [[1000, "running"]]);
   });
 });

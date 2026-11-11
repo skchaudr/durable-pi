@@ -13,7 +13,7 @@ import type {
   WireToolSlot,
   WireUsage,
 } from "../../../dpi-sdk/src/api.js";
-import type { PrimeChild } from "../driver.js";
+import { CHILD_AGENT_BASE, type PrimeChild } from "../driver.js";
 
 // Prime events are untyped JSON at this boundary.
 type J = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -124,7 +124,7 @@ export class Translator {
   private results = new Map<string, WireEntry>();
   private compaction?: WireCompaction;
   private nextTask = 1;
-  /** Prime child id -> its dpi agent id and merged fields. Ids count up from 2 in first-seen order (not kept across restarts). */
+  /** Prime child id -> its dpi agent id and merged fields. Ids count up from CHILD_AGENT_BASE in first-seen order (not kept across restarts). */
   private kids = new Map<string, { agentId: number; row: J }>();
 
   constructor(init: { entries: WireEntry[]; agent: WireAgentState }) {
@@ -148,7 +148,7 @@ export class Translator {
     const id = child?.id;
     if (typeof id !== "string" || !id) return;
     const had = this.kids.get(id);
-    this.kids.set(id, { agentId: had?.agentId ?? this.kids.size + 2, row: { ...had?.row, ...child } });
+    this.kids.set(id, { agentId: had?.agentId ?? CHILD_AGENT_BASE + this.kids.size, row: { ...had?.row, ...child } });
   }
 
   childRow(id: string): J | undefined {
