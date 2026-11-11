@@ -148,19 +148,23 @@ test("agents: addressing, detail, config, entries, transcript, benign and unsupp
     assert.equal((await b.call("GET", `${base}/tasks?status=x`)).status, 400);
     assert.deepEqual((await b.call("GET", `${base}/inspect`)).body, {});
 
+    // extensions and tasks go to the driver; the fake one has none
+    const patchExt = await b.call("PATCH", `${base}/agents/main/extensions`, { name: "x", enabled: true });
+    assert.equal(patchExt.status, 400);
+    assert.deepEqual((await b.call("GET", `${base}/tasks?status=live`)).body, []);
+    assert.equal((await b.call("POST", `${base}/tasks/1/abort`, {})).status, 400);
+    assert.equal((await b.call("POST", `${base}/tasks/x/abort`, {})).status, 400);
     // everything else
     const nope: [string, string, unknown][] = [
       ["POST", `${base}/agents/main/fork`, { entryId: 1 }],
       ["POST", `${base}/agents/main/compact`, {}],
       ["POST", `${base}/agents/main/reset`, {}],
-      ["PATCH", `${base}/agents/main/extensions`, { name: "x", enabled: true }],
       ["PATCH", `${base}/compaction`, { reserveTokens: 2048 }],
       ["GET", `${base}/compaction`, undefined],
       ["POST", `${base}/agents/main/demo/state`, {}],
       ["POST", `${base}/agents/main/demo/jobs/3/approval`, {}],
       ["DELETE", `${base}/agents/main/inbox/1`, undefined],
       ["GET", `${base}/submissions/1`, undefined],
-      ["POST", `${base}/tasks/1/abort`, {}],
       ["POST", `${base}/agents`, {}],
       ["PATCH", `${base}/agents/main`, { name: "x" }],
       ["GET", `${base}/agents/main/docs/demo.job-runs`, undefined],

@@ -1,7 +1,7 @@
 // PrimeDriver over Prime's daemon protocol (not ACP; the name is historical). One socket to the supervisor carries every
 // session; each session keeps a Translator (src/prime/translate.ts) that turns Prime session events into dpi events.
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AgentConfig, ModelInfo, ThinkingLevel, WhenBusy, WireAgentEvent, WireAgentState, WireSnapshotEvent } from "../../dpi-sdk/src/api.js";
 import type { BackendConfig } from "./config.js";
 import type { PrimeAgentHandle, PrimeDriver } from "./driver.js";
@@ -10,6 +10,8 @@ import { DaemonClient, PrimeError, type ClientOptions, type SessionEventFrame } 
 import { launchEnv, primeEnv } from "./prime/env.js";
 import { readDefaultModel, readModels } from "./prime/models.js";
 import { Translator, messagesToEntries } from "./prime/translate.js";
+import * as ext from "./prime/extend.js";
+import { PrimeTasks } from "./prime/tasks.js";
 
 export interface DriverOptions extends ClientOptions {
   socketPath?: string;
@@ -43,6 +45,7 @@ class PrimeSession implements PrimeAgentHandle {
     private cwd: string,
     private readonly sessionFile: string | undefined,
     private readonly register: (s: PrimeSession) => void,
+    private readonly idDir?: string,
   ) {
     this.agent = { cwd };
   }
@@ -128,6 +131,29 @@ class PrimeSession implements PrimeAgentHandle {
   busy() {
     return this.translator?.busy() ?? false;
   }
+  private taskSource?: PrimeTasks;
+  tasks() {
+    return (this.taskSource ??= new PrimeTasks(this.client, () => this.activeId, {
+      idFile: this.idDir ? join(this.idDir, `task-ids-${this.primeSessionId}.json`) : undefined,
+    }));
+  }
+  closeTasks() {
+    this.taskSource?.close();
+  }
+
+  private get extendCtx(): ext.ExtendContext {
+    return { client: this.client, agentDir: dirname(this.sessionDir), activeSessionId: this.activeId, sessionId: this.primeSessionId };
+  }
+  extensions() {
+    return ext.extensions(this.extendCtx);
+  }
+  patchExtensions(body: unknown) {
+    return ext.patch(this.extendCtx, body as Parameters<typeof ext.patch>[1]);
+  }
+  tools() {
+    return ext.tools(this.extendCtx);
+  }
+
   config(): AgentConfig {
     const { model, thinkingLevel, cwd } = this.agent;
     return { ...(model ? { model } : {}), ...(thinkingLevel ? { thinkingLevel: thinkingLevel as ThinkingLevel } : {}), ...(cwd ? { cwd } : {}), readOnly: false };
@@ -246,14 +272,14 @@ export default async function createDriver(_config?: BackendConfig, options: Dri
       } catch (e) {
         return fault(e);
       }
-      const s = new PrimeSession(client, sessionDir, options.env, made.sessionId, cwd, made.sessionFile, track);
+      const s = new PrimeSession(client, sessionDir, options.env, made.sessionId, cwd, made.sessionFile, track, _config?.dataDir);
       await adopt(s, made.sessionFile, made);
       return { primeSessionId: made.sessionId as string };
     },
     async openSession(primeSessionId, cwd) {
       if (sessions.has(primeSessionId)) return;
       const file = await sessionFile(sessionDir, primeSessionId);
-      await adopt(new PrimeSession(client, sessionDir, options.env, primeSessionId, cwd, file, track), file);
+      await adopt(new PrimeSession(client, sessionDir, options.env, primeSessionId, cwd, file, track, _config?.dataDir), file);
     },
     agent(primeSessionId) {
       const s = sessions.get(primeSessionId);
@@ -264,6 +290,7 @@ export default async function createDriver(_config?: BackendConfig, options: Dri
     defaultModel: () => defaultModel,
     async close() {
       closing = true;
+      for (const s of sessions.values()) s.closeTasks();
       await Promise.all([...byActive.keys()].map((id) => client.request({ type: "detach", activeSessionId: id }, 1000).catch(() => {})));
       client.close();
     },

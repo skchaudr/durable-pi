@@ -13,6 +13,7 @@ import type {
   WireUsage,
 } from "../../dpi-sdk/src/api.js";
 import type { PrimeAgentHandle, PrimeDriver } from "./driver.js";
+import { invalid } from "./errors.js";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const usage = (): WireUsage => ({
@@ -68,6 +69,18 @@ export class FakeAgent implements PrimeAgentHandle {
   }
   config() {
     return { ...this.cfg };
+  }
+  async extensions() {
+    return { extensions: [], builtIn: [] };
+  }
+  async patchExtensions(): Promise<never> {
+    throw invalid("No extensions on the fake driver");
+  }
+  async tools() {
+    return [];
+  }
+  tasks() {
+    return { liveTasks: async () => [], terminalTasks: async () => [], abort: async () => { throw invalid("No task"); }, onChange: () => () => {} };
   }
   async setConfig(patch: Partial<AgentConfig>) {
     this.cfg = { ...this.cfg, ...patch };

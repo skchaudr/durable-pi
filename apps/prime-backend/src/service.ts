@@ -278,8 +278,9 @@ export class Service {
     return this.agents(row)[0];
   }
 
-  agentDetail(row: SessionRow): AgentDetail {
-    return { ...this.agentSummary(row), sessionId: row.id, config: this.handle(row).config(), tools: [], extensions: [] };
+  async agentDetail(row: SessionRow): Promise<AgentDetail> {
+    const h = this.handle(row);
+    return { ...this.agentSummary(row), sessionId: row.id, config: h.config(), tools: await h.tools(), extensions: [] };
   }
 
   async configure(row: SessionRow, body: Record<string, unknown>): Promise<AgentConfig> {

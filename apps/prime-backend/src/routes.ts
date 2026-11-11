@@ -75,13 +75,18 @@ export function v1(svc: Service) {
       next(e);
     }
   });
-  r.get("/sessions/:s/tasks", (req, res) => {
+  r.get("/sessions/:s/tasks", route(async (req, res) => {
     const status = String(req.query.status ?? "terminal");
     if (!["live", "terminal"].includes(status)) throw invalid("status must be live or terminal");
-    svc.handle(L(res).row);
-    res.json([]);
-  });
-  r.post("/sessions/:s/tasks/:taskId/abort", unsupported);
+    const t = svc.handle(L(res).row).tasks();
+    res.json(status === "live" ? await t.liveTasks() : await t.terminalTasks(Math.min(Math.max(Number(req.query.limit) || 20, 1), 200)));
+  }));
+  r.post("/sessions/:s/tasks/:taskId/abort", route(async (req, res) => {
+    const id = Number(req.params.taskId);
+    if (!Number.isInteger(id)) throw invalid("taskId must be an integer");
+    await svc.handle(L(res).row).tasks().abort(id);
+    res.json({ status: "aborted" });
+  }));
   r.get("/sessions/:s/inspect", (_req, res) => {
     svc.handle(L(res).row);
     res.json({});
@@ -92,7 +97,7 @@ export function v1(svc: Service) {
   r.get("/sessions/:s/agents", (_req, res) => res.json(svc.agents(L(res).row)));
   r.post("/sessions/:s/agents", unsupported);
   const a = "/sessions/:s/agents/:a";
-  r.get(a, (_req, res) => res.json(svc.agentDetail(L(res).row)));
+  r.get(a, route(async (_req, res) => res.json(await svc.agentDetail(L(res).row))));
   r.patch(a, unsupported);
   r.get(`${a}/events`, (req, res, next) => {
     try {
@@ -119,8 +124,8 @@ export function v1(svc: Service) {
   r.post(`${a}/fork`, unsupported);
   r.get(`${a}/config`, (_req, res) => res.json(L(res).h.config()));
   r.patch(`${a}/config`, route(async (req, res) => res.json(await svc.configure(L(res).row, req.body ?? {}))));
-  r.get(`${a}/extensions`, (_req, res) => res.json({ extensions: [], builtIn: [] }));
-  r.patch(`${a}/extensions`, unsupported);
+  r.get(`${a}/extensions`, route(async (_req, res) => res.json(await L(res).h.extensions())));
+  r.patch(`${a}/extensions`, route(async (req, res) => res.json(await L(res).h.patchExtensions(req.body ?? {}))));
   r.post(`${a}/compact`, unsupported);
   r.post(`${a}/reset`, unsupported);
   r.get(`${a}/docs/:kind`, unsupported);

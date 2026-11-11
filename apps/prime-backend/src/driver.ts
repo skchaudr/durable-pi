@@ -1,6 +1,10 @@
 // The seam between the dpi-facing server and Prime. Everything dpi-shaped lives outside this file.
 import type {
   AgentConfig,
+  AgentDetail,
+  AgentExtensions,
+  TaskNode,
+  TaskOutcome,
   ModelInfo,
   ThinkingLevel,
   WhenBusy,
@@ -16,6 +20,18 @@ export interface PrimeAgentHandle {
   abort(): Promise<void>;
   setConfig(patch: Partial<AgentConfig>): Promise<AgentConfig>;
   config(): AgentConfig;
+  extensions(): Promise<AgentExtensions>;
+  patchExtensions(body: unknown): Promise<AgentExtensions>;
+  tools(): Promise<AgentDetail["tools"]>;
+  tasks(): TaskSource;
+}
+
+/** Prime's schedules, heartbeats and goal as dpi tasks (src/prime/tasks.ts). Created in chat; listed and cancelled here. */
+export interface TaskSource {
+  liveTasks(): Promise<TaskNode[]>;
+  terminalTasks(limit?: number): Promise<TaskOutcome[]>;
+  abort(taskId: number): Promise<void>;
+  onChange(listener: () => void): () => void;
 }
 
 export interface PrimeDriver {

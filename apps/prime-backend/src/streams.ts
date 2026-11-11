@@ -38,17 +38,26 @@ export function deviceStream(svc: Service, req: Request, res: Response) {
 export function sessionStream(svc: Service, row: SessionRow, res: Response) {
   const handle = svc.handle(row);
   const sse = openSse(res, { kind: "session", sessionId: row.id });
-  sse.send({ type: "session", agents: svc.agents(row), tasks: [], usage: svc.usage(row) });
+  const tasks = handle.tasks();
+  const liveTasks = () => tasks.liveTasks().catch(() => []);
+  void liveTasks().then((t) => {
+    if (sse.closed) return;
+    sse.send({ type: "session", agents: svc.agents(row), tasks: t, usage: svc.usage(row) });
+    sse.sendIfChanged("tasks", { type: "tasks", tasks: t });
+  });
   const push = coalesce(async () => {
     if (sse.closed || !svc.handles.has(row.id)) return;
     sse.sendIfChanged("agents", { type: "agents", agents: svc.agents(row) });
     sse.sendIfChanged("usage", { type: "usage", usage: svc.usage(row) });
+    sse.sendIfChanged("tasks", { type: "tasks", tasks: await liveTasks() });
   }, 250);
   const off = handle.subscribe(() => push());
   const offCatalog = svc.subscribe(() => push());
+  const offTasks = tasks.onChange(() => push());
   sse.onClose(() => {
     off();
     offCatalog();
+    offTasks();
     push.cancel();
   });
 }
