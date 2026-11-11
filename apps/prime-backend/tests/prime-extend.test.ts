@@ -87,12 +87,10 @@ test("mcp merges the daemon roster with settings.json and never shows env values
   assert.equal(g.enabled, true);
   assert.deepEqual(g.prompts!.map((p) => [p.id, p.description, p.enabled]), [
     ["mcp:files", "connected · stdio · stdio · user", true],
-    ["mcp:linear", "not connected · http · subscription · built-in", false],
     ["mcp:ghost", "not loaded · http · user", false],
-  ]);
+  ]); // linear is a built-in catalog service that is not connected, so it is not listed
   assert.match(g.prompts![0].text, /"TOKEN"/);
   assert.doesNotMatch(JSON.stringify(g), /sekret/);
-  assert.match(g.prompts![1].text, /built-in/);
 });
 
 test("mcp falls back to settings.json when the daemon cannot answer", async () => {

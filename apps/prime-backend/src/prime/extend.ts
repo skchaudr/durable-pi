@@ -113,7 +113,8 @@ export async function mcpGroup(c: ExtendContext): Promise<HarnessExtensionInfo> 
     roster = (await c.client.request({ type: "get_mcp_connections", activeSessionId: c.activeSessionId }))?.connections ?? [];
   } catch {} // no MCP manager in this session, or the daemon is down: settings.json alone still lists the servers
   const rows = new Map<string, { label: string; status: string; detail: string }>();
-  for (const r of roster ?? [])
+  // Built-in services that are not connected are Prime's catalog, not this agent's servers.
+  for (const r of (roster ?? []).filter((r: any) => r.connected || r.userDeclared))
     rows.set(r.server, { label: r.label || r.server, status: r.connected ? "connected" : "not connected", detail: [r.transport, r.authKind, r.userDeclared ? "user" : "built-in"].filter(Boolean).join(" · ") });
   for (const [name, cfg] of Object.entries(configured))
     if (!rows.has(name)) rows.set(name, { label: name, status: roster ? "not loaded" : "status unknown", detail: [cfg?.type, "user"].filter(Boolean).join(" · ") });
@@ -127,7 +128,7 @@ export async function mcpGroup(c: ExtendContext): Promise<HarnessExtensionInfo> 
   return {
     name: "mcp",
     title: "MCP servers",
-    description: "MCP servers Prime knows (settings.json mcpServers plus built-in catalog) and whether each is connected. Prime has no daemon command to connect or disconnect one without deleting its credential.",
+    description: "MCP servers this agent has: connected ones and the ones in settings.json mcpServers. Prime has no daemon command to connect or disconnect one without deleting its credential.",
     enabled: prompts.some((p) => p.enabled),
     prompts,
   };
