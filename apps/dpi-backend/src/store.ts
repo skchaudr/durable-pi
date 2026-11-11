@@ -274,6 +274,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS requests(key TEXT PRIMARY KEY,route TEXT NOT NULL,status INTEGER NOT NULL,body TEXT NOT NULL,createdAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS session_spawns(key TEXT PRIMARY KEY,sessionId TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_compaction(sessionId TEXT PRIMARY KEY,settings TEXT NOT NULL);`);
+    // Archive is a flag: the session's folder and catalog row stay, so unarchive is one update.
+    const cols = this.catalog.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "archivedAt")) this.catalog.exec("ALTER TABLE sessions ADD COLUMN archivedAt INTEGER");
     const uid = this.catalog.prepare("SELECT value FROM meta WHERE key='device_uid'").get() as
       | { value: string }
       | undefined;
@@ -441,21 +444,21 @@ export class Store {
   // ------------------------------------------------------------ sessions
 
   list(): SessionRow[] {
-    return this.catalog.prepare("SELECT * FROM sessions ORDER BY createdAt DESC").all() as SessionRow[];
+    return this.catalog.prepare("SELECT * FROM sessions WHERE archivedAt IS NULL ORDER BY createdAt DESC").all() as SessionRow[];
   }
 
   row(id: string): SessionRow {
-    const row = this.catalog.prepare("SELECT * FROM sessions WHERE id=?").get(id) as SessionRow | undefined;
+    const row = this.catalog.prepare("SELECT * FROM sessions WHERE id=? AND archivedAt IS NULL").get(id) as SessionRow | undefined;
     if (!row) throw notFound(`No session ${id}`);
     return row;
   }
 
   /** A session by UUID or unique case-insensitive name. */
   resolveSession(ref: string): SessionRow {
-    const byId = this.catalog.prepare("SELECT * FROM sessions WHERE id=?").get(ref) as SessionRow | undefined;
+    const byId = this.catalog.prepare("SELECT * FROM sessions WHERE id=? AND archivedAt IS NULL").get(ref) as SessionRow | undefined;
     if (byId) return byId;
     const matches = this.catalog
-      .prepare("SELECT * FROM sessions WHERE lower(name)=lower(?)")
+      .prepare("SELECT * FROM sessions WHERE lower(name)=lower(?) AND archivedAt IS NULL")
       .all(ref) as SessionRow[];
     if (matches.length === 1) return matches[0];
     if (matches.length > 1)
@@ -499,7 +502,7 @@ export class Store {
     this.catalog.exec("BEGIN");
     try {
       this.catalog
-        .prepare("INSERT INTO sessions VALUES(?,?,?,?,?,?,?)")
+        .prepare("INSERT INTO sessions(id,name,cwd,dbPath,createdAt,model,provider) VALUES(?,?,?,?,?,?,?)")
         .run(id, row.name, cwd, row.dbPath, row.createdAt, row.model, row.provider);
       if (spawnKey) this.catalog.prepare("INSERT OR REPLACE INTO session_spawns VALUES(?,?)").run(spawnKey, id);
       this.catalog.exec("COMMIT");
@@ -555,18 +558,25 @@ export class Store {
       }
       this.opened.delete(row.id);
     }
-    await mkdir(this.archiveDir, { recursive: true });
-    const target = join(this.archiveDir, `${row.id}-${Date.now()}`);
-    try {
-      await renamePath(dirname(row.dbPath), target);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-    }
-    this.catalog.prepare("DELETE FROM conversation_names WHERE sessionId=?").run(row.id);
-    this.catalog.prepare("DELETE FROM sessions WHERE id=?").run(row.id);
+    this.catalog.prepare("UPDATE sessions SET archivedAt=? WHERE id=?").run(Date.now(), row.id);
     this.errors.delete(row.id);
     this.notify();
-    return { archived: target };
+    return { archived: dirname(row.dbPath) };
+  }
+
+  /** Archived sessions, newest archive first. */
+  archived(): (SessionRow & { archivedAt: number })[] {
+    return this.catalog.prepare("SELECT * FROM sessions WHERE archivedAt IS NOT NULL ORDER BY archivedAt DESC").all() as (SessionRow & { archivedAt: number })[];
+  }
+
+  /** Bring an archived session back by id; it reopens like any session at the next request. */
+  async unarchive(id: string) {
+    const row = this.catalog.prepare("SELECT * FROM sessions WHERE id=? AND archivedAt IS NOT NULL").get(id) as SessionRow | undefined;
+    if (!row) throw notFound(`No archived session ${id}`);
+    this.catalog.prepare("UPDATE sessions SET archivedAt=NULL WHERE id=?").run(id);
+    await this.openAgent(row).catch((e) => this.errors.set(row.id, e instanceof Error ? e.message : String(e)));
+    this.notify();
+    return this.sessionSummary(row);
   }
 
   async openAgent(row: SessionRow, create = false, thinkingLevel: ThinkingLevel = "low") {

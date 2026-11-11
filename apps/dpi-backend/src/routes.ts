@@ -76,6 +76,8 @@ export function v1(store: Store) {
   r.get("/sessions/:s/compaction", route(async (_req, res) => res.json(store.compactionOf(L(res).row.id))));
   r.patch("/sessions/:s/compaction", route(async (req, res) => res.json(store.setCompaction(L(res).row, req.body ?? {}))));
   r.delete("/sessions/:s", route(async (_req, res) => res.json(await store.archive(L(res).row))));
+  r.get("/archived", (_req, res) => res.json(store.archived().map(({ id, name, cwd, createdAt, archivedAt }) => ({ id, name, cwd, createdAt, archivedAt }))));
+  r.post("/archived/:id/restore", route(async (req, res) => res.json(await store.unarchive(String(req.params.id)))));
   r.get("/sessions/:s/events", route(async (_req, res) => sessionStream(store, L(res).row, res)));
   r.get(
     "/sessions/:s/tasks",

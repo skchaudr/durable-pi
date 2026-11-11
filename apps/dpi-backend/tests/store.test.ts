@@ -128,11 +128,18 @@ test("sessions, browse, names, forks, jobs, restart recovery, approval, interrup
       ["Main", "Subagent #n", "alt approach", "reviewer"],
     );
 
-    // Archive moves files and removes the catalog row.
+    // Archive hides the session and keeps its files and row; restore brings it back with its history.
     const { archived } = await store.archive(store.row(session.id));
     assert.ok(existsSync(join(archived, "agent.sqlite")));
     assert.equal(store.list().length, 0);
     assert.throws(() => store.resolveSession("Test"), /No session/);
+    assert.deepEqual(store.archived().map((r) => r.id), [session.id]);
+    const restored = await store.unarchive(session.id);
+    assert.equal(restored.id, session.id);
+    assert.equal(store.list().length, 1);
+    assert.equal(store.resolveSession("Test").id, session.id);
+    assert.equal(store.archived().length, 0);
+    await assert.rejects(store.unarchive(session.id), /No archived session/);
   } finally {
     await store.close();
     await t.cleanup();
