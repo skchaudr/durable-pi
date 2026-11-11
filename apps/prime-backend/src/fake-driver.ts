@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   AgentConfig,
+  CompactionSettings,
   ModelInfo,
   ThinkingLevel,
   WhenBusy,
@@ -29,6 +30,8 @@ export class FakeAgent implements PrimeAgentHandle {
   entries: WireEntry[] = [];
   sends: { content: string; whenBusy: WhenBusy }[] = [];
   aborts = 0;
+  compacts: (string | undefined)[] = [];
+  autoCompaction = true;
   private listeners = new Set<(events: readonly WireAgentEvent[]) => void>();
   private running?: number;
   private nextEntry = 1;
@@ -100,6 +103,25 @@ export class FakeAgent implements PrimeAgentHandle {
   }
   tasks() {
     return { liveTasks: async () => [], terminalTasks: async () => [], abort: async () => { throw invalid("No task"); }, onChange: () => () => {} };
+  }
+  async compaction(): Promise<CompactionSettings> {
+    return { enabled: this.autoCompaction, reserveTokens: 16384, backgroundTokens: 0, keepRecentTokens: 20000 };
+  }
+  async setCompaction(patch: Record<string, unknown>) {
+    if (patch.reserveTokens !== undefined) throw invalid("No reserveTokens on the fake driver");
+    if (typeof patch.enabled === "boolean") this.autoCompaction = patch.enabled;
+    return this.compaction();
+  }
+  async compact(instructions?: string) {
+    this.compacts.push(instructions);
+    return { taskId: this.compacts.length };
+  }
+  async reset() {
+    this.entries = [];
+    const primeSessionId = `fake-${randomUUID()}`;
+    this.owner.agents.set(primeSessionId, this);
+    this.emit([this.snapshot()]);
+    return { primeSessionId };
   }
   async setConfig(patch: Partial<AgentConfig>) {
     this.cfg = { ...this.cfg, ...patch };
