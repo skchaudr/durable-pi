@@ -27,6 +27,25 @@ test("compaction: enabled from get_connection_state, margins from settings.json,
   rmSync(join(root, "settings.json"));
 });
 
+test("compaction: with a model, reserveTokens is the margin of Prime's trigger (window, output budget, 95%, retention floor)", async () => {
+  const dir = mkdtempSync(join(root, "m-"));
+  const model = { provider: "p", modelId: "m" };
+  const put = (m: object, compaction?: object) => {
+    writeFileSync(join(dir, "models.json"), JSON.stringify({ providers: { p: { models: [{ id: "m", ...m }] } } }));
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ compaction }));
+  };
+  const margin = async () => (await compaction({ ...fake({}, [], dir), model })).reserveTokens;
+  put({ contextWindow: 400000, maxTokens: 128000 }); // combined cap: 400000 - 128000 - 16384
+  assert.equal(await margin(), 144384);
+  put({ contextWindow: 1000000 }); // 95% cap; maxTokens defaults to 16384
+  assert.equal(await margin(), 50000);
+  put({ contextWindow: 1000000 }, { thresholdPercent: 50 });
+  assert.equal(await margin(), 500000);
+  put({ contextWindow: 100000 }, { keepRecentTokens: 60000, reserveTokens: 20000 }); // retention floor 100001 -> combined cap 63616
+  assert.equal(await margin(), 36384);
+  assert.equal((await compaction(fake({}, [], dir))).reserveTokens, 20000); // no model: Prime's raw reserve
+});
+
 test("setCompaction: enabled is set_auto_compaction; every other field is a one-line 400", async () => {
   const sent: any[] = [];
   const out = await setCompaction(fake({ autoCompactionEnabled: false }, sent), { enabled: false });
@@ -90,7 +109,9 @@ test("integration: settings, compact and reset through the driver", { skip }, as
     const seen: WireAgentEvent[] = [];
     a.subscribe((e) => seen.push(...e));
 
-    assert.deepEqual(await a.compaction(), { enabled: true, reserveTokens: 9000, backgroundTokens: 0, keepRecentTokens: 20000 });
+    // the margin is Prime's trigger: min(95% of 200k, 200k - 16384 default output - 9000 reserve) = 174616, so 25384 below the window
+    assert.deepEqual(await a.compaction(), { enabled: true, reserveTokens: 25384, backgroundTokens: 0, keepRecentTokens: 20000 });
+    assert.deepEqual(a.compactionNow(), await a.compaction()); // the session summary's copy, no daemon call
     assert.equal((await a.setCompaction({ enabled: false })).enabled, false);
     assert.equal((await a.compaction()).enabled, false);
     assert.equal(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).compaction.enabled, false); // Prime persists the toggle

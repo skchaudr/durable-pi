@@ -107,6 +107,9 @@ export class FakeAgent implements PrimeAgentHandle {
   async compaction(): Promise<CompactionSettings> {
     return { enabled: this.autoCompaction, reserveTokens: 16384, backgroundTokens: 0, keepRecentTokens: 20000 };
   }
+  compactionNow(): CompactionSettings {
+    return { enabled: this.autoCompaction, reserveTokens: 16384, backgroundTokens: 0, keepRecentTokens: 20000 };
+  }
   async setCompaction(patch: Record<string, unknown>) {
     if (patch.reserveTokens !== undefined) throw invalid("No reserveTokens on the fake driver");
     if (typeof patch.enabled === "boolean") this.autoCompaction = patch.enabled;

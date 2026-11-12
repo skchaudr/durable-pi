@@ -268,7 +268,7 @@ export class Service {
     };
     if (!this.handles.has(row.id)) return { ...base, busy: false, agents: [], error: this.errors.get(row.id) ?? "Session unavailable" };
     const agents = this.agents(row);
-    return { ...base, busy: agents.some((a) => a.busy), agents };
+    return { ...base, busy: agents.some((a) => a.busy), agents, compaction: this.handle(row).compactionNow() };
   }
 
   tree(): DeviceTree {
@@ -314,7 +314,7 @@ export class Service {
 
   async agentDetail(row: SessionRow, agent = MAIN_AGENT, child?: PrimeChild): Promise<AgentDetail> {
     const base = { ...this.agentSummary(row, agent), sessionId: row.id };
-    if (child) return { ...base, config: {}, tools: [], extensions: [] };
+    if (child) return { ...base, config: { ...(child.model ? { model: child.model } : {}), cwd: row.cwd }, tools: [], extensions: [] };
     const h = this.handle(row, agent);
     return { ...base, config: h.config(), tools: await h.tools(), extensions: [] };
   }

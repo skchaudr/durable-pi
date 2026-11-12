@@ -24,6 +24,8 @@ export interface PrimeChild {
   name: string;
   /** Prime's run status: running | done | error | cancelled. */
   status: string;
+  /** Its model, from Prime's "provider/id". */
+  model?: { provider: string; modelId: string };
 }
 
 export interface PrimeAgentHandle {
@@ -38,6 +40,7 @@ export interface PrimeAgentHandle {
   patchExtensions(body: unknown): Promise<AgentExtensions>;
   tools(): Promise<AgentDetail["tools"]>;
   compaction(): Promise<CompactionSettings>;
+  compactionNow(): CompactionSettings; // compaction() without asking Prime, for the session summary
   setCompaction(patch: Record<string, unknown>): Promise<CompactionSettings>;
   compact(instructions?: string): Promise<{ taskId: number }>; // answers once the summary has started
   reset(): Promise<{ primeSessionId: string }>; // Prime's new_session: a fresh session file, which the catalog must follow
