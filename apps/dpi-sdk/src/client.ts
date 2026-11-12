@@ -3,6 +3,7 @@ import type {
   AgentDetail,
   AgentExtensions,
   AgentSummary,
+  ArchivedSession,
   CompactionSettings,
   CreateAgentBody,
   CreateSessionBody,
@@ -144,6 +145,12 @@ export class DpiClient {
   }
   createSession(body: CreateSessionBody, idempotencyKey = newId()) {
     return this.request<SessionSummary>("POST", "/v1/sessions", body, { idempotencyKey });
+  }
+  archivedSessions() {
+    return this.request<ArchivedSession[]>("GET", "/v1/archived");
+  }
+  restoreSession(id: string) {
+    return this.request<SessionSummary>("POST", `/v1/archived/${enc(id)}/restore`, {});
   }
   session(ref: string) {
     return new SessionHandle(this, ref);

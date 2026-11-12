@@ -11,6 +11,7 @@ import {
   Plus,
   RefreshCw,
   Archive,
+  ArchiveRestore,
 } from "lucide-vue-next";
 import DeviceIcon from "./DeviceIcon.vue";
 import type { TreeNode } from "@sdk/models";
@@ -111,6 +112,14 @@ const title = computed(() => {
           @click="emit('action', 'new-session')"
         >
           <Plus :size="16" /></button
+        ><button
+          class="icon-button"
+          :disabled="!online"
+          :aria-label="`Archived sessions on ${label}`"
+          title="Archived sessions (restore)"
+          @click="emit('action', 'archived')"
+        >
+          <ArchiveRestore :size="16" /></button
         ><button
           class="icon-button"
           :aria-label="`Check ${label}`"

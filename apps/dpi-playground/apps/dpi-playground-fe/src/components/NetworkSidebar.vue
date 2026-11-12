@@ -66,6 +66,7 @@ async function action(node: TreeNode, name: string) {
   const client = deviceClient(device.id);
   if (node.type === "device") {
     if (name === "new-session") ui.dialog = { kind: "new-session", deviceId: device.id };
+    else if (name === "archived") ui.dialog = { kind: "archived", deviceId: device.id };
     else if (name === "check") await attempt(() => hub.check(device.id));
     return;
   }

@@ -105,6 +105,15 @@ export interface AgentStatus {
 
 export type AgentSummary = AgentRef & AgentStatus;
 
+/** A session hidden by archive; restore brings it back. archivedAt is null for rows archived before it was recorded. */
+export interface ArchivedSession {
+  id: string;
+  name: string;
+  cwd: string;
+  createdAt: number;
+  archivedAt: number | null;
+}
+
 export interface SessionSummary {
   id: string;
   name: string;

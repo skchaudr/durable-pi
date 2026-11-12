@@ -67,24 +67,41 @@ export class Service {
   static async open(options: ServiceOptions, driver: PrimeDriver) {
     const svc = new Service({ ...options, dataDir: resolve(options.dataDir) }, driver);
     await Promise.all(options.startDirs.map((dir) => mkdir(dir, { recursive: true }).catch(() => {})));
-    for (const row of svc.catalog.list()) {
+    for (const row of svc.catalog.list()) await svc.reopen(row);
+    return svc;
+  }
+
+  /** Reopens a session's root and extra agents through the driver; failures are recorded per agent, not thrown. */
+  private async reopen(row: SessionRow) {
+    try {
+      await this.driver.openSession(row.primeSessionId, row.cwd);
+      this.attach(row);
+    } catch (e) {
+      this.errors.set(row.id, String(e instanceof Error ? e.message : e));
+      return;
+    }
+    for (const a of this.catalog.agents(row.id)) {
       try {
-        await driver.openSession(row.primeSessionId, row.cwd);
-        svc.attach(row);
+        await this.driver.openSession(a.primeSessionId, row.cwd);
+        this.attach(row, a.id, a.primeSessionId);
       } catch (e) {
-        svc.errors.set(row.id, String(e instanceof Error ? e.message : e));
-        continue;
-      }
-      for (const a of svc.catalog.agents(row.id)) {
-        try {
-          await driver.openSession(a.primeSessionId, row.cwd);
-          svc.attach(row, a.id, a.primeSessionId);
-        } catch (e) {
-          svc.errors.set(key(row.id, a.id), String(e instanceof Error ? e.message : e));
-        }
+        this.errors.set(key(row.id, a.id), String(e instanceof Error ? e.message : e));
       }
     }
-    return svc;
+  }
+
+  archived() {
+    return this.catalog.archived().map(({ id, name, cwd, createdAt, archivedAt }) => ({ id, name, cwd, createdAt, archivedAt }));
+  }
+
+  /** Brings an archived session back by id and reopens its agents. */
+  async unarchive(id: string) {
+    const row = this.catalog.getArchived(id);
+    if (!row) throw notFound(`No archived session ${id}`);
+    this.catalog.unarchive(id);
+    await this.reopen(row);
+    this.notify();
+    return this.sessionSummary(row);
   }
 
   get uid() {

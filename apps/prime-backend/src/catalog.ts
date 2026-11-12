@@ -42,6 +42,8 @@ export class Catalog {
       CREATE TABLE IF NOT EXISTS agents(sessionId TEXT NOT NULL,id INTEGER NOT NULL,primeSessionId TEXT NOT NULL,name TEXT,kind TEXT NOT NULL,parentId INTEGER,forkedAt INTEGER,PRIMARY KEY(sessionId,id));
       CREATE TABLE IF NOT EXISTS requests(key TEXT PRIMARY KEY,route TEXT NOT NULL,status INTEGER NOT NULL,body TEXT NOT NULL,createdAt INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS sends(sessionId TEXT NOT NULL,requestId TEXT NOT NULL,submissionId INTEGER NOT NULL,PRIMARY KEY(sessionId,requestId));`);
+    const cols = this.db.prepare("PRAGMA table_info(sessions)").all() as { name: string }[];
+    if (!cols.some((c) => c.name === "archivedAt")) this.db.exec("ALTER TABLE sessions ADD COLUMN archivedAt INTEGER");
     const found = this.db.prepare("SELECT value FROM meta WHERE key='device_uid'").get() as { value: string } | undefined;
     this.uid = found?.value ?? randomUUID();
     if (!found) this.db.prepare("INSERT INTO meta(key,value) VALUES('device_uid',?)").run(this.uid);
@@ -76,7 +78,17 @@ export class Catalog {
     this.db.prepare("UPDATE sessions SET primeSessionId=? WHERE id=?").run(primeSessionId, id);
   }
   archive(id: string) {
-    this.db.prepare("UPDATE sessions SET archived=1 WHERE id=?").run(id);
+    this.db.prepare("UPDATE sessions SET archived=1,archivedAt=? WHERE id=?").run(Date.now(), id);
+  }
+  /** Archived sessions, newest archive first (rows archived before archivedAt existed have none). */
+  archived(): (SessionRow & { archivedAt: number | null })[] {
+    return this.db.prepare("SELECT * FROM sessions WHERE archived=1 ORDER BY archivedAt DESC").all() as never;
+  }
+  getArchived(id: string): SessionRow | undefined {
+    return this.db.prepare("SELECT * FROM sessions WHERE id=? AND archived=1").get(id) as SessionRow | undefined;
+  }
+  unarchive(id: string) {
+    this.db.prepare("UPDATE sessions SET archived=0,archivedAt=NULL WHERE id=?").run(id);
   }
 
   agents(sessionId: string): AgentRow[] {

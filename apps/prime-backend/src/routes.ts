@@ -75,6 +75,8 @@ export function v1(svc: Service) {
   r.get("/sessions/:s", (_req, res) => res.json(svc.sessionSummary(L(res).row)));
   r.patch("/sessions/:s", (req, res) => res.json(svc.rename(L(res).row, req.body?.name)));
   r.delete("/sessions/:s", route(async (_req, res) => res.json(await svc.archive(L(res).row))));
+  r.get("/archived", (_req, res) => res.json(svc.archived()));
+  r.post("/archived/:id/restore", route(async (req, res) => res.json(await svc.unarchive(String(req.params.id)))));
   r.get("/sessions/:s/compaction", route(async (_req, res) => res.json(await svc.handle(L(res).row).compaction())));
   r.patch("/sessions/:s/compaction", route(async (req, res) => res.json(await svc.handle(L(res).row).setCompaction(req.body ?? {}))));
   r.get("/sessions/:s/events", (_req, res, next) => {

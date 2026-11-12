@@ -99,6 +99,17 @@ test("sessions: create, idempotency, lookup by name, rename, archive, validation
     assert.deepEqual(Object.keys((await b.call("DELETE", `/v1/sessions/${s.id}`)).body), ["archived"]);
     assert.equal((await b.call("GET", `/v1/sessions/${s.id}`)).status, 404);
     assert.equal((await b.client.tree()).sessions.length, 1);
+
+    const listed = (await b.call("GET", "/v1/archived")).body;
+    assert.deepEqual(listed.map((a: { id: string }) => a.id), [s.id]);
+    assert.equal(typeof listed[0].archivedAt, "number");
+    assert.equal((await b.call("POST", `/v1/archived/${dup.id}/restore`)).status, 404);
+    const restored = await b.call("POST", `/v1/archived/${s.id}/restore`);
+    assert.equal(restored.status, 200);
+    assert.equal(restored.body.id, s.id);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}`)).status, 200);
+    assert.deepEqual((await b.call("GET", "/v1/archived")).body, []);
+    assert.equal((await b.call("POST", `/v1/archived/${s.id}/restore`)).status, 404);
   } finally {
     await b.stop();
     await b.cleanup();

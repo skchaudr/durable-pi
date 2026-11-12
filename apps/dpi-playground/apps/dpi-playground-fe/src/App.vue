@@ -17,6 +17,7 @@ import NetworkSidebar from "./components/NetworkSidebar.vue";
 import AgentView from "./components/AgentView.vue";
 import Inspector from "./components/Inspector.vue";
 import OfflinePanel from "./components/OfflinePanel.vue";
+import ArchivedDialog from "./components/ArchivedDialog.vue";
 import NewSessionDialog from "./components/NewSessionDialog.vue";
 import PromptDialog from "./components/PromptDialog.vue";
 import ModelPicker from "./components/ModelPicker.vue";
@@ -210,6 +211,11 @@ onBeforeUnmount(() => {
     <PromptDialog
       v-else-if="ui.dialog?.kind === 'prompt'"
       :dialog="ui.dialog"
+      @close="ui.dialog = undefined"
+    />
+    <ArchivedDialog
+      v-else-if="ui.dialog?.kind === 'archived'"
+      :device-id="ui.dialog.deviceId"
       @close="ui.dialog = undefined"
     />
     <ModelPicker v-else-if="ui.dialog?.kind === 'models'" @close="ui.dialog = undefined" />
