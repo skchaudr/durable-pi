@@ -110,6 +110,12 @@ function addUsage(total: WireUsage, u: Partial<WireUsage> | undefined): WireUsag
   };
 }
 
+/** Prime's "provider/id" (the id may hold slashes) as a dpi model; nothing when it is not that. */
+export const modelRef = (m: unknown) => {
+  const i = typeof m === "string" ? m.indexOf("/") : -1;
+  return i > 0 ? { model: { provider: (m as string).slice(0, i), modelId: (m as string).slice(i + 1) } } : {};
+};
+
 export class Translator {
   private entries: WireEntry[];
   private nextId: number;
@@ -161,6 +167,7 @@ export class Translator {
       id,
       name: String(row.sessionName || row.label || id),
       status: String(row.status ?? "running"),
+      ...modelRef(row.model),
     }));
   }
 

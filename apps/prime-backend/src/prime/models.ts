@@ -5,7 +5,7 @@ import type { ModelInfo } from "../../../dpi-sdk/src/api.js";
 
 export const FALLBACK_DEFAULT_MODEL = "gpt-6.1-sol";
 
-const readJson = (path: string): any => {
+export const readJson = (path: string): any => {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch {
@@ -50,4 +50,10 @@ export function readDefaultModel(agentDir: string, models: ModelInfo[]): string 
   const ids = new Set(models.map((m) => m.id));
   for (const c of [saved, saved.split("/").slice(1).join("/"), FALLBACK_DEFAULT_MODEL]) if (c && ids.has(c)) return c;
   return models[0]?.id ?? FALLBACK_DEFAULT_MODEL;
+}
+
+/** A custom model's output budget as Prime sends it per request (simple_options.rs default_request_max_tokens): a configured maxTokens as is, else 16384. */
+export function readMaxTokens(agentDir: string, provider: string, modelId: string): number {
+  const m = (readJson(join(agentDir, "models.json")).providers?.[provider]?.models ?? []).find((x: any) => x?.id === modelId);
+  return m?.maxTokens ?? 16384;
 }

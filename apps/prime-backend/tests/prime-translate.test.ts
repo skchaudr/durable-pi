@@ -233,6 +233,14 @@ describe("rlm child agents", () => {
     assert.equal(t.childRow("child-1")?.activeSessionId, "live-1"); // kept through the status-only update
   });
 
+  it("carries the child's model, split at the first slash", () => {
+    const t = new Translator({ entries: [], agent: {} });
+    t.setChild({ id: "a", model: "cliproxy/gpt-6.1-sol" });
+    t.setChild({ id: "b", model: "or/meta/llama" });
+    t.setChild({ id: "c", model: "bare" });
+    assert.deepEqual(t.children().map((c) => c.model), [{ provider: "cliproxy", modelId: "gpt-6.1-sol" }, { provider: "or", modelId: "meta/llama" }, undefined]);
+  });
+
   it("ignores an update with no child id and seeds from a get_rlm_children roster", () => {
     const t = new Translator({ entries: [], agent: {} });
     t.apply({ type: "rlm_child_update" });

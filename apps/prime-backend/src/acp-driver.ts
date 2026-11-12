@@ -9,7 +9,7 @@ import { ApiFault, invalid } from "./errors.js";
 import { DaemonClient, PrimeError, type ClientOptions, type SessionEventFrame } from "./prime/client.js";
 import { launchEnv, primeEnv } from "./prime/env.js";
 import { readDefaultModel, readModels } from "./prime/models.js";
-import { Translator, messagesToEntries } from "./prime/translate.js";
+import { Translator, messagesToEntries, modelRef } from "./prime/translate.js";
 import * as ext from "./prime/extend.js";
 import { forkPoint } from "./prime/fork.js";
 import { PrimeTasks } from "./prime/tasks.js";
@@ -38,6 +38,7 @@ class PrimeSession implements PrimeAgentHandle {
   private listeners = new Set<Listener>();
   private childListeners = new Set<() => void>();
   private agent: WireAgentState;
+  private autoCompaction = true; // the daemon's set_auto_compaction, kept for the sync session summary
   private submission = Date.now(); // ids only need to grow, also across backend restarts
 
   constructor(
@@ -72,6 +73,7 @@ class PrimeSession implements PrimeAgentHandle {
     // daemon get_rlm_children (state_getters.rs:30): the roster, for children that started before this attach.
     const roster: unknown[] = (await this.client.request({ type: "get_rlm_children", activeSessionId: this.activeId }).catch(() => undefined))?.children ?? [];
     this.cwd = state.cwd ?? this.cwd;
+    this.autoCompaction = state.autoCompactionEnabled !== false;
     this.agent = {
       ...(state.model ? { model: { provider: state.model.provider, modelId: state.model.id } } : {}),
       ...(state.thinkingLevel ? { thinkingLevel: state.thinkingLevel } : {}),
@@ -155,7 +157,8 @@ class PrimeSession implements PrimeAgentHandle {
     } catch (e) {
       return fault(e);
     }
-    return new Translator({ entries: messagesToEntries(messages), agent: { cwd: this.cwd } }).snapshot();
+    const model = modelRef(this.translator?.childRow(id)?.model).model;
+    return new Translator({ entries: messagesToEntries(messages), agent: { cwd: this.cwd, ...(model ? { model } : {}) } }).snapshot();
   }
   private taskSource?: PrimeTasks;
   tasks() {
@@ -181,13 +184,21 @@ class PrimeSession implements PrimeAgentHandle {
   }
 
   private get compactionCtx(): comp.CompactionContext {
-    return { client: this.client, agentDir: dirname(this.sessionDir), activeSessionId: this.activeId };
+    return { client: this.client, agentDir: dirname(this.sessionDir), activeSessionId: this.activeId, model: this.agent.model };
   }
   async compaction() {
-    return comp.compaction(this.compactionCtx).catch(fault);
+    const out = await comp.compaction(this.compactionCtx).catch(fault);
+    this.autoCompaction = out.enabled;
+    return out;
+  }
+  /** The same settings without asking the daemon: what the session summary carries so the page's context bar shows Prime's markers. */
+  compactionNow() {
+    return comp.compactionSettings(dirname(this.sessionDir), this.agent.model, this.autoCompaction);
   }
   async setCompaction(patch: Record<string, unknown>) {
-    return comp.setCompaction(this.compactionCtx, patch).catch(fault);
+    const out = await comp.setCompaction(this.compactionCtx, patch).catch(fault);
+    this.autoCompaction = out.enabled;
+    return out;
   }
 
   /** Prime answers compact when the summary is done; dpi answers with the task as soon as it starts. A failure before the start is the caller's error. */
