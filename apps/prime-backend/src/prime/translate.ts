@@ -26,9 +26,19 @@ const KINDS: Record<string, string> = {
 };
 const kindOf = (role: string) => KINDS[role] ?? `pi.${role}`;
 
+/** dpi's compaction entry: the summary rides as its model message (the page shows it under "Context note"). head = the first entry, so nothing is hidden: Prime keeps the whole transcript on screen. */
+const compactionEntry = (id: number, head: number, summary: unknown, timestamp?: unknown): WireEntry => ({
+  id,
+  conversationId: 1,
+  kind: "pi.compaction",
+  head,
+  model: [{ role: "user", content: [{ type: "text", text: String(summary ?? "") }], timestamp: typeof timestamp === "number" ? timestamp : Date.now() } as WireMessage],
+});
+
 export function messagesToEntries(primeMessages: unknown[], firstId = 1): WireEntry[] {
   return primeMessages.map((m, i) => {
     const r = m as J;
+    if (r?.role === "compactionSummary") return compactionEntry(firstId + i, firstId, r.summary, r.timestamp);
     if (r?.role === "custom" && r.customType === "revival_event")
       return { id: firstId + i, conversationId: 1, kind: REVIVAL_KIND, data: { text: revivalText(r.details ?? {}), event: r.details } };
     return { id: firstId + i, conversationId: 1, kind: kindOf(r?.role), model: [m as WireMessage] };
@@ -268,10 +278,17 @@ export class Translator {
         out.push({ type: "compaction_start", taskId, reason: this.compaction.reason, blocking: false });
         break;
       }
-      case "compaction_end":
+      case "compaction_end": {
         if (this.compaction) out.push({ type: "compaction_end", taskId: this.compaction.taskId, reason: this.compaction.reason });
         this.compaction = undefined;
+        // A skipped or aborted compaction has no result; a real one carries the summary.
+        if (typeof e.result?.summary === "string" && !e.aborted) {
+          const entry = compactionEntry(this.nextId++, this.entries[0]?.id ?? 1, e.result.summary);
+          this.entries.push(entry);
+          out.push({ type: "entry_appended", entry });
+        }
         break;
+      }
       case "revival":
       case "revival_continued":
       case "worker_restarted": {
