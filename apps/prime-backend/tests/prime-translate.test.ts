@@ -164,6 +164,27 @@ describe("Translator", () => {
     assert.deepEqual(t.apply({ type: "compaction_end", reason: "threshold" }), [{ type: "compaction_end", taskId: 1, reason: "threshold" }]);
     assert.equal(t.snapshot().compactions.length, 0);
   });
+
+  it("the compaction summary is a pi.compaction entry with the summary as its note, live and from history, and hides nothing", () => {
+    const t = new Translator({ entries: messagesToEntries([userMsg]), agent: {} });
+    t.apply({ type: "compaction_start", reason: "manual" });
+    const out = t.apply({ type: "compaction_end", reason: "manual", result: { summary: "the story so far", tokensBefore: 9 }, aborted: false });
+    assert.deepEqual(out.map((x) => x.type), ["compaction_end", "entry_appended"]);
+    const live = (out[1] as Extract<WireAgentEvent, { type: "entry_appended" }>).entry;
+    assert.deepEqual([live.id, live.kind, live.head], [2, "pi.compaction", 1]);
+    const [row] = messagesToEntries([{ role: "compactionSummary", summary: "the story so far", tokensBefore: 9, timestamp: 5 }], 7);
+    assert.deepEqual([row.id, row.kind, row.head], [7, "pi.compaction", 7]);
+    // skipped or aborted compactions carry no summary
+    t.apply({ type: "compaction_start", reason: "manual" });
+    assert.deepEqual(t.apply({ type: "compaction_end", reason: "manual", errorMessage: "Session is too short to compact" }).map((x) => x.type), ["compaction_end"]);
+    // the page's model renders it under "Context note" next to the earlier messages
+    const m = new AgentModel();
+    m.apply({ type: "snapshot", snapshot: t.snapshot(), inbox: [] });
+    m.apply({ type: "batch", events: [{ type: "entry_appended", entry: live }] });
+    const items = m.state.items;
+    assert.deepEqual(items.map((i) => i.kind), ["user", "event"]);
+    assert.equal((items[1] as { note?: string }).note, "the story so far");
+  });
 });
 
 describe("messagesToEntries", () => {
