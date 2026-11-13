@@ -35,13 +35,37 @@ const compactionEntry = (id: number, head: number, summary: unknown, timestamp?:
   model: [{ role: "user", content: [{ type: "text", text: String(summary ?? "") }], timestamp: typeof timestamp === "number" ? timestamp : Date.now() } as WireMessage],
 });
 
+/** Prime's hidden notice after a compaction (pa-core ipython_state.rs `notice_content`): one card, not a bare pi.custom. */
+const PYTHON_STATE_KIND = "prime.python_state";
+const names = (list: string | undefined) => (list ?? "").split(",").map((n) => n.trim()).filter(Boolean);
+/** Names the notice lists. `defined` is absent when the kernel listing failed (the notice then has no names sentence). Python names hold no ".", so the sentence ends at the first one. */
+export function parsePythonState(text: string): { defined?: string[]; pruned: string[] } {
+  const defined = /These names are still defined: ([^.]*)\./.exec(text)?.[1];
+  const pruned = /Variables above the per-variable snapshot limit were removed: ([^.]*)\./.exec(text)?.[1];
+  return {
+    ...(defined !== undefined ? { defined: names(defined) } : text.includes("You have not defined any names yet.") ? { defined: [] } : {}),
+    pruned: names(pruned),
+  };
+}
+const contentText = (c: unknown): string => (typeof c === "string" ? c : Array.isArray(c) ? c.map((b: J) => (b?.type === "text" ? (b.text ?? "") : "")).join("") : "");
+
+/** A Prime message as a dpi entry: the python-state notice becomes its own kind, everything else keeps its role's pi.* kind. */
+function messageEntry(id: number, m: J): WireEntry {
+  if (m?.role === "custom" && m.customType === "ipython_state") {
+    const parsed = parsePythonState(contentText(m.content));
+    const n = parsed.defined?.length;
+    return { id, conversationId: 1, kind: PYTHON_STATE_KIND, data: { text: `Python kernel survived compaction${n === undefined ? "" : ` (${n} name${n === 1 ? "" : "s"} defined)`}.`, ...parsed } };
+  }
+  return { id, conversationId: 1, kind: kindOf(m?.role), model: [m as WireMessage] };
+}
+
 export function messagesToEntries(primeMessages: unknown[], firstId = 1): WireEntry[] {
   return primeMessages.map((m, i) => {
     const r = m as J;
     if (r?.role === "compactionSummary") return compactionEntry(firstId + i, firstId, r.summary, r.timestamp);
     if (r?.role === "custom" && r.customType === "revival_event")
       return { id: firstId + i, conversationId: 1, kind: REVIVAL_KIND, data: { text: revivalText(r.details ?? {}), event: r.details } };
-    return { id: firstId + i, conversationId: 1, kind: kindOf(r?.role), model: [m as WireMessage] };
+    return messageEntry(firstId + i, r);
   });
 }
 
@@ -244,7 +268,7 @@ export class Translator {
         break;
       case "message_end": {
         const m = e.message as J;
-        const entry: WireEntry = { id: this.nextId++, conversationId: 1, kind: kindOf(m.role), model: [m as WireMessage] };
+        const entry = messageEntry(this.nextId++, m);
         this.entries.push(entry);
         if (m.role === "toolResult") this.results.set(m.toolCallId, entry);
         out.push({ type: "message_end", entry });

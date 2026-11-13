@@ -1195,6 +1195,68 @@ svg {
 .event-line > span {
   flex: 1;
 }
+.prime-card {
+  border: 1px solid #453032;
+  border-radius: 6px;
+  background: #251819;
+  padding: 10px 14px;
+  margin: 8px 0;
+  color: #f2eeee;
+  font-size: 16px;
+}
+.revival-card {
+  border-left: 3px solid var(--accent);
+}
+.python-card {
+  border-left: 3px solid var(--secondary);
+}
+.prime-card-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.prime-card-meta {
+  color: var(--muted);
+  font-size: 14px;
+}
+.prime-card-body {
+  margin-top: 8px;
+}
+.prime-card-calls {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.prime-card-calls li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 3px 0;
+}
+.prime-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  vertical-align: middle;
+}
+.prime-chip {
+  font-size: 14px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: #3a2628;
+  color: #f2eeee;
+}
+.chip-started {
+  background: #5a3a1e;
+}
+.chip-never {
+  background: #2c3a2c;
+}
+.chip-pruned {
+  background: none;
+  border: 1px dashed #6b4a4d;
+  text-decoration: line-through;
+}
 .pi-tool-result {
   margin-top: -17px;
   margin-bottom: 20px;
