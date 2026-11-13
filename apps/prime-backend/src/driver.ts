@@ -47,8 +47,14 @@ export interface PrimeAgentHandle {
   tasks(): TaskSource;
   children(): PrimeChild[];
   onChildren(fn: () => void): () => void; // the roster or a child's status changed
-  /** A child's transcript as Prime holds it now (no live feed); throws a 400 when Prime cannot serve it. */
-  childSnapshot(id: string): Promise<WireSnapshotEvent>;
+  /**
+   * A child (Prime's id) as a handle of its own, attached to its live session with its own Translator, so entries stream like the
+   * main agent's. On it: send() is send_message from this session, abort() is cancel_rlm_child, setConfig takes thinkingLevel only.
+   * Throws a 400 when the child has no live session.
+   */
+  openChild(id: string): Promise<PrimeAgentHandle>;
+  /** retry_worker: Prime's manual recovery trigger for this session's worker. */
+  retryWorker(): Promise<void>;
 }
 
 /** Prime's schedules, heartbeats and goal as dpi tasks (src/prime/tasks.ts). Created in chat; listed and cancelled here. */

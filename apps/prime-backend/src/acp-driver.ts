@@ -42,6 +42,8 @@ class PrimeSession implements PrimeAgentHandle {
   private readonly compStore: comp.CompactionStore = { backgroundTokens: 0 };
   private backgroundFired = false; // the early compaction started for this crossing of the background line
   private submission = Date.now(); // ids only need to grow, also across backend restarts
+  /** Child sessions opened through openChild, by Prime's child id; `live` is the active id they attached to. */
+  private kids = new Map<string, { live: string; ready: Promise<PrimeSession> }>();
 
   constructor(
     private readonly client: DaemonClient,
@@ -50,8 +52,10 @@ class PrimeSession implements PrimeAgentHandle {
     public primeSessionId: string,
     private cwd: string,
     private sessionFile: string | undefined,
-    private readonly register: (s: PrimeSession) => void,
+    private readonly register: (s: PrimeSession, drop?: boolean) => void,
     private readonly idDir?: string,
+    /** Set when this is one of `parent`'s Prime child agents (an rlm child), not a session of its own. */
+    private readonly child?: { parent: PrimeSession; id: string },
   ) {
     this.agent = { cwd };
   }
@@ -59,6 +63,7 @@ class PrimeSession implements PrimeAgentHandle {
   /** create (an existing session file revives its live worker) -> attach -> get_messages -> Translator. `made`: a create response already in hand. */
   async open(file: string, made?: any) {
     this.translator = undefined; // events buffer until the translator exists again
+    for (const id of [...this.kids.keys()]) this.release(id); // their active ids are stale after a re-open
     made ??= await this.client.request({
       type: "create",
       lifecycle: "resident",
@@ -81,7 +86,7 @@ class PrimeSession implements PrimeAgentHandle {
       ...(state.thinkingLevel ? { thinkingLevel: state.thinkingLevel } : {}),
       cwd: this.cwd,
     };
-    await comp.compaction(this.compactionCtx).catch(() => undefined); // caches the live values for the session summary's context bar
+    if (!this.child) await comp.compaction(this.compactionCtx).catch(() => undefined); // caches the live values for the session summary's context bar
     this.translator = new Translator({ entries, agent: this.agent });
     for (const c of roster) this.translator.setChild(c as Record<string, unknown>);
     const buffered = this.buffered.filter((f) => (f.meta?.sequence ?? Infinity) > lastSeq);
@@ -110,6 +115,7 @@ class PrimeSession implements PrimeAgentHandle {
 
   /** Reopens after a supervisor restart (the active id changes) and tells subscribers to reset to a fresh snapshot. */
   async resync() {
+    if (this.child) return this.child.parent.release(this.child.id); // shortcut: the next openChild re-attaches; streams already open keep what they had
     const file = this.sessionFile ?? (await sessionFile(this.sessionDir, this.primeSessionId));
     await this.open(file);
     this.emit([this.snapshot()]);
@@ -125,7 +131,7 @@ class PrimeSession implements PrimeAgentHandle {
     }
     if (frame.event?.type === "rlm_child_update") for (const fn of [...this.childListeners]) fn();
     if (events.length) this.emit(events);
-    if (frame.event?.type === "agent_end") void this.compactInBackground();
+    if (frame.event?.type === "agent_end" && !this.child) void this.compactInBackground();
   }
 
   /**
@@ -171,18 +177,42 @@ class PrimeSession implements PrimeAgentHandle {
     this.childListeners.add(fn);
     return () => void this.childListeners.delete(fn);
   }
-  /** Reads the child's session through its live id (get_messages); a child whose worker is gone has none, and Prime's error is the 400. */
-  async childSnapshot(id: string) {
+  /** Attaches the child's live session (the id the roster carries); a child whose worker is gone has none, and Prime's error is the 400. */
+  async openChild(id: string): Promise<PrimeAgentHandle> {
     const live = this.translator?.childRow(id)?.activeSessionId;
     if (typeof live !== "string" || !live) throw invalid(`Prime has no live session for child ${id}`);
-    let messages: unknown[];
+    const have = this.kids.get(id);
+    if (have?.live === live) return have.ready;
+    this.release(id);
+    const s = new PrimeSession(this.client, this.sessionDir, this.env, id, this.cwd, undefined, this.register, undefined, { parent: this, id });
+    const ready = s.open("", { activeSessionId: live }).then(() => s);
+    this.kids.set(id, { live, ready });
     try {
-      messages = await this.loadMessages(live);
+      return await ready;
     } catch (e) {
+      if (this.kids.get(id)?.ready === ready) this.kids.delete(id);
+      this.register(s, true);
       return fault(e);
     }
-    const model = modelRef(this.translator?.childRow(id)?.model).model;
-    return new Translator({ entries: messagesToEntries(messages), agent: { cwd: this.cwd, ...(model ? { model } : {}) } }).snapshot();
+  }
+  /** Stops feeding a child session: out of the driver's routing, detached on the daemon. */
+  release(id: string) {
+    const k = this.kids.get(id);
+    if (!k) return;
+    this.kids.delete(id);
+    void k.ready
+      .then((s) => {
+        this.register(s, true);
+        return this.client.request({ type: "detach", activeSessionId: s.activeId }, 1000);
+      })
+      .catch(() => {});
+  }
+  async retryWorker() {
+    try {
+      await this.client.request({ type: "retry_worker", activeSessionId: this.activeId }, 60000);
+    } catch (e) {
+      fault(e);
+    }
   }
   private taskSource?: PrimeTasks;
   tasks() {
@@ -275,7 +305,10 @@ class PrimeSession implements PrimeAgentHandle {
   async send(content: string, whenBusy: WhenBusy) {
     const submissionId = ++this.submission;
     try {
-      if (!this.busy())
+      // A child takes messages the way Prime's agents talk to each other: from its parent session. Prime decides what busy means.
+      if (this.child)
+        await this.client.request({ type: "send_message", targetActiveSessionId: this.activeId, message: content, fromActiveSessionId: this.child.parent.activeId }, 60000);
+      else if (!this.busy())
         // followUp + queueIfBusy is what Prime's own ACP client sends: it also resumes a queue suspended by an abort.
         await this.client.request({ type: "prompt", activeSessionId: this.activeId, message: content, streamingBehavior: "followUp", queueIfBusy: true }, 60000);
       else
@@ -288,13 +321,15 @@ class PrimeSession implements PrimeAgentHandle {
 
   async abort() {
     try {
-      await this.client.request({ type: "abort", activeSessionId: this.activeId });
+      if (this.child) await this.client.request({ type: "cancel_rlm_child", activeSessionId: this.child.parent.activeId, childId: this.child.id });
+      else await this.client.request({ type: "abort", activeSessionId: this.activeId });
     } catch (e) {
       fault(e);
     }
   }
 
   async setConfig(patch: Partial<AgentConfig>) {
+    if (this.child && patch.model) throw invalid("A Prime child agent keeps the model it started with");
     if (patch.instructions !== undefined) throw invalid("Prime sessions do not take per-session instructions");
     if (patch.readOnly) throw invalid("Prime sessions have no read-only mode");
     if (patch.cwd !== undefined && patch.cwd !== this.cwd) throw invalid("A Prime session cannot change its working folder");
@@ -334,9 +369,9 @@ export default async function createDriver(_config?: BackendConfig, options: Dri
 
   const sessions = new Map<string, PrimeSession>(); // by primeSessionId
   const byActive = new Map<string, PrimeSession>();
-  const track = (s: PrimeSession) => {
+  const track = (s: PrimeSession, drop = false) => {
     for (const [k, v] of byActive) if (v === s) byActive.delete(k);
-    byActive.set(s.activeId, s);
+    if (!drop) byActive.set(s.activeId, s);
   };
   let closing = false;
   const resync = async (s: PrimeSession) => {

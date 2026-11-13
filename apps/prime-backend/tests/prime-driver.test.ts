@@ -111,6 +111,14 @@ test("a supervisor restart reconnects, revives the sessions and pushes a fresh s
   assert.equal(a.snapshot().entries.length, 4);
 });
 
+test("retryWorker on a live session is retry_worker and leaves it usable; a child that was never seen has no live session", { skip }, async () => {
+  const a = driver!.agent(SID);
+  await a.retryWorker();
+  assert.equal(a.busy(), false);
+  assert.equal(a.snapshot().entries.length, 4);
+  await assert.rejects(a.openChild("no-such-child"), (e: ApiFault) => e.code === "invalid");
+});
+
 test("an unknown session id is a not_found fault", { skip }, async () => {
   await assert.rejects(driver!.openSession("00000000-0000-7000-8000-000000000000", work), (e: ApiFault) => e.code === "not_found");
 });

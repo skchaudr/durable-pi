@@ -26,6 +26,7 @@ import {
   device,
   notify,
   preset,
+  primeChild,
   select,
   selected,
   sessionAgents,
@@ -203,6 +204,7 @@ watch(
             </template>
           </nav>
           <button
+            v-if="!primeChild"
             class="icon-button"
             aria-label="Rename agent"
             title="Rename this agent"

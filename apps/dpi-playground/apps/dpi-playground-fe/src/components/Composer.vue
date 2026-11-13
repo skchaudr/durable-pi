@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import { ArrowUp, ChevronDown, Clock3, Octagon, X } from "lucide-vue-next";
 import type { WhenBusy } from "@sdk/api";
 import { newId } from "../client/ids";
-import { commands, parseCommand, type SlashCommand } from "../client/commands";
+import { commandsFor, parseCommand, type SlashCommand } from "../client/commands";
 import {
   agentHandle,
   agentState,
@@ -12,6 +12,7 @@ import {
   interrupt,
   interrupting,
   online,
+  primeChild,
   selected,
   ui,
 } from "../client/store";
@@ -25,7 +26,7 @@ const menuClosed = ref(false);
 const matches = computed(() => {
   const m = ui.composer.match(/^\/(\S*)$/);
   return m && !menuClosed.value
-    ? commands.filter((c) => c.name.startsWith(m[1].toLowerCase()))
+    ? commandsFor(primeChild.value).filter((c) => c.name.startsWith(m[1].toLowerCase()))
     : [];
 });
 watch(
@@ -65,7 +66,7 @@ function keydown(e: KeyboardEvent) {
 }
 
 async function runCommand(text: string) {
-  const parsed = parseCommand(text);
+  const parsed = parseCommand(text, primeChild.value);
   if (!parsed) return false;
   pending.value = true;
   await attempt(async () => {
@@ -145,13 +146,17 @@ function withdraw(id: number) {
       <textarea
         v-model="ui.composer"
         rows="2"
-        placeholder="Give your agent something to do, or type / for commands…"
+        :placeholder="
+          primeChild
+            ? 'Message this worker. It arrives as an agent message from Main.'
+            : 'Give your agent something to do, or type / for commands…'
+        "
         aria-label="Message your agent"
         @keydown="keydown"
       />
       <div class="composer-toolbar">
         <div class="composer-left">
-          <div class="queue-mode">
+          <div v-if="!primeChild" class="queue-mode">
             <select
               v-model="mode"
               aria-label="When busy"
@@ -167,10 +172,16 @@ function withdraw(id: number) {
           <button
             class="interrupt"
             :disabled="!busy || interrupting"
-            title="Stop foreground work and owned subagents (Escape). Background jobs continue."
+            :title="
+              primeChild
+                ? 'Cancel this worker (Escape). Prime keeps it as cancelled; it cannot be deleted.'
+                : 'Stop foreground work and owned subagents (Escape). Background jobs continue.'
+            "
             @click="interrupt"
           >
-            <Octagon :size="24" class="stop-sign" fill="currentColor" />Interrupt</button
+            <Octagon :size="24" class="stop-sign" fill="currentColor" />{{
+              primeChild ? "Cancel" : "Interrupt"
+            }}</button
           ><button
             class="send"
             aria-label="Send message"

@@ -45,6 +45,7 @@ import {
   ui,
   usage,
   panelKeys,
+  primeChild,
 } from "../client/store";
 
 // Each tool's parameters as a highlighted TypeScript declaration, rebuilt only when the tools change.
@@ -52,13 +53,16 @@ const signatures = computed(
   () => new Map(detail.value?.tools.map((t) => [t.name, toolSignature(t.name, t.parameters)])),
 );
 
-const tabs = [
+const allTabs = [
   { id: "session", label: "Session", icon: FolderOpen },
   { id: "state", label: "State", icon: Braces },
   { id: "tasks", label: "Tasks", icon: Activity },
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "extensions", label: "Extend", icon: Puzzle },
 ];
+// A Prime child serves neither App State, tools nor extensions.
+const tabs = computed(() => (primeChild.value ? allTabs.filter((t) => t.id === "session" || t.id === "tasks") : allTabs));
+watch(tabs, (t) => t.some((x) => x.id === ui.tab) || (ui.tab = "session"));
 const usageRows = computed(() => [
   { label: "Input", tokens: usage.value.input, cost: usage.value.inputCost },
   { label: "Output", tokens: usage.value.output, cost: usage.value.outputCost },
@@ -244,7 +248,11 @@ const offeredTools = computed(() => detail.value?.tools.filter((t) => t.offered)
             <div class="section-label">
               <span>AGENT</span>
             </div>
-            <button class="model-button" @click="ui.dialog = { kind: 'models' }">
+            <component
+              :is="primeChild ? 'div' : 'button'"
+              class="model-button"
+              @click="!primeChild && (ui.dialog = { kind: 'models' })"
+            >
               <img :src="icon(agentState.agent.model?.modelId)" alt="" />
               <div>
                 <strong>{{
@@ -255,8 +263,8 @@ const offeredTools = computed(() => detail.value?.tools.filter((t) => t.offered)
                   {{ agentState.agent.model?.provider ?? "" }}</small
                 >
               </div>
-              <ChevronDown :size="18" />
-            </button>
+              <ChevronDown v-if="!primeChild" :size="18" />
+            </component>
             <div class="thinking-row">
               <span>Thinking</span
               ><select
@@ -272,7 +280,7 @@ const offeredTools = computed(() => detail.value?.tools.filter((t) => t.offered)
                 <option v-for="level in THINKING_LEVELS" :key="level">{{ level }}</option>
               </select>
             </div>
-            <ContextBar />
+            <ContextBar v-if="!primeChild" />
             <section class="stats-section" aria-labelledby="stats-title">
               <div class="section-label"><span id="stats-title">STATS</span></div>
               <div class="metrics">

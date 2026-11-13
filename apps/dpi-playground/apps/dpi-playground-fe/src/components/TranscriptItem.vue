@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import {
   Activity,
   Ban,
@@ -18,7 +18,7 @@ import {
 import type { ScriptCall } from "@sdk/api";
 import type { TranscriptItem, ToolCallView } from "@sdk/transcript";
 import { markdown } from "../client/markdown";
-import { device, json } from "../client/store";
+import { agentHandle, attempt, device, json, notify, primeChild } from "../client/store";
 import { now, runByCall, runById, seconds } from "../client/jobs";
 import JobCard from "./JobCard.vue";
 
@@ -46,6 +46,16 @@ const revivalTitle = (e: Revival) =>
       : e.outcome === "skipped"
         ? "Session not revived"
         : "Session revived after a crash";
+// Worker failure events: a crash restart, or a session Prime did not revive. Retrying a worker that is already up is harmless.
+const workerFailed = (e: Revival) => e.type === "worker_restarted" || (e.type === "revival" && e.outcome === "skipped");
+const retrying = ref(false);
+async function retryWorker() {
+  const handle = agentHandle.value;
+  if (!handle || retrying.value) return;
+  retrying.value = true;
+  if (await attempt(() => handle.retryWorker())) notify("Prime recovered the session worker.");
+  retrying.value = false;
+}
 const pythonState = (item: TranscriptItem) =>
   ((item as { data?: { defined?: string[]; pruned?: string[] } }).data ?? {}) as { defined?: string[]; pruned?: string[] };
 const statusLabel = (call: ToolCallView) =>
@@ -117,7 +127,7 @@ const entryClass = (item: TranscriptItem) =>
         <span v-if="item.streaming" class="streaming">Working</span
         ><span v-else>#{{ item.id }}</span
         ><button
-          v-if="!item.streaming"
+          v-if="!item.streaming && !primeChild"
           class="fork-button"
           :aria-label="`Fork at entry ${item.id}`"
           title="Fork from this entry. App State stays shared."
@@ -187,7 +197,7 @@ const entryClass = (item: TranscriptItem) =>
             <div class="tool-section-label">
               <span>Result</span>
               <button
-                v-if="b.call.resultEntryId !== undefined"
+                v-if="b.call.resultEntryId !== undefined && !primeChild"
                 class="fork-button"
                 :aria-label="`Fork at entry ${b.call.resultEntryId}`"
                 title="Fork after this result"
@@ -218,6 +228,7 @@ const entryClass = (item: TranscriptItem) =>
           }}</strong
           ><span>{{ item.isError ? "error" : "result" }}</span
           ><button
+            v-if="!primeChild"
             class="fork-button"
             :aria-label="`Fork at entry ${item.id}`"
             @click.prevent="emit('fork', item.id)"
@@ -249,7 +260,16 @@ const entryClass = (item: TranscriptItem) =>
         <span v-if="revival(item).failure !== undefined" class="prime-card-meta"
           >failure {{ revival(item).failure }}<template v-if="revival(item).maxFailures !== undefined">/{{ revival(item).maxFailures }}</template></span
         ><span v-else-if="revival(item).restarts" class="prime-card-meta">restarts {{ revival(item).restarts }}</span
-        ><span v-if="revival(item).at" class="prime-card-meta">{{ revival(item).at }}</span>
+        ><span v-if="revival(item).at" class="prime-card-meta">{{ revival(item).at }}</span
+        ><button
+          v-if="workerFailed(revival(item))"
+          class="fork-button"
+          :disabled="retrying"
+          title="Ask Prime to recover this session's worker (retry_worker)"
+          @click="retryWorker"
+        >
+          <RotateCcw :size="18" />Retry worker
+        </button>
       </div>
       <div v-if="revival(item).reason" class="prime-card-body">{{ revival(item).reason }}</div>
       <ul v-if="revival(item).interruptedToolCalls?.length" class="prime-card-calls">
@@ -287,6 +307,7 @@ const entryClass = (item: TranscriptItem) =>
           :size="18"
         /><span>{{ item.text }}</span
         ><button
+          v-if="!primeChild"
           class="fork-button"
           :aria-label="`Fork at entry ${item.id}`"
           @click="emit('fork', item.id)"

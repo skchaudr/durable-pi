@@ -449,9 +449,16 @@ export class Service {
     return { ok: true as const };
   }
 
-  /** An agent's live entries, or a Prime child's as Prime holds them now. */
-  async agentEntries(row: SessionRow, agent = MAIN_AGENT, child?: PrimeChild): Promise<readonly WireEntry[]> {
-    return child ? (await this.handle(row).childSnapshot(child.id)).entries : this.handle(row, agent).snapshot().entries;
+  /** A Prime child's live handle (attached on first use). It is kept under the child's agent id, so send, configure and abort reach it like any agent's. */
+  async childHandle(row: SessionRow, child: PrimeChild): Promise<PrimeAgentHandle> {
+    const h = await this.handle(row).openChild(child.id);
+    this.handles.set(key(row.id, child.agentId), h);
+    return h;
+  }
+
+  /** An agent's live entries. */
+  agentEntries(row: SessionRow, agent = MAIN_AGENT): readonly WireEntry[] {
+    return this.handle(row, agent).snapshot().entries;
   }
 
   entries(source: readonly WireEntry[], cursor: string | undefined, limit: number): Page<WireEntry> {
