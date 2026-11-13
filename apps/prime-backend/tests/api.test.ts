@@ -301,11 +301,11 @@ test("Prime child agents: subagents in the tree and agents list, read-only agent
     const snap = await stream.waitFor((f) => f.type === "snapshot", "child snapshot");
     assert.equal((snap as Extract<Frame, { type: "snapshot" }>).snapshot.entries.length, 1);
 
-    for (const [method, path] of [["POST", "messages"], ["POST", "abort"], ["GET", "config"], ["PATCH", "config"], ["GET", "extensions"], ["POST", "fork"], ["PATCH", ""]]) {
+    for (const [method, path] of [["GET", "extensions"], ["PATCH", "extensions"], ["POST", "fork"], ["POST", "compact"], ["POST", "reset"], ["GET", "docs/demo.workspace"], ["DELETE", "inbox/1"], ["PATCH", ""]]) {
       const r = await b.call(method, `/v1/sessions/${s.id}/agents/1000${path && `/${path}`}`, method === "GET" ? undefined : {});
       assert.equal(r.status, 400, `${method} ${path}`);
       assert.equal(r.body.error.code, "invalid");
-      assert.match(r.body.error.message, /child agents are read-only/);
+      assert.match(r.body.error.message, /Not supported on a Prime child agent/);
     }
     assert.equal(main.sends.length, 0);
     assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/9999`)).status, 404);
@@ -317,12 +317,90 @@ test("Prime child agents: subagents in the tree and agents list, read-only agent
     assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/side`)).body.kind, "root");
     assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/worker-a`)).body.kind, "subagent");
 
-    main.childEntries.clear(); // Prime cannot read a child whose session is gone
-    const gone = await b.call("GET", `/v1/sessions/${s.id}/agents/1000/entries`);
-    assert.equal(gone.status, 400);
-    assert.match(gone.body.error.message, /no live session for child child-1/);
+    // A child whose session is gone has no live handle to attach: the summary still answers, the rest is a 400
+    main.childHandles.clear();
+    main.childEntries.clear();
+    for (const path of ["entries", "events", "transcript", "config"]) {
+      const gone = await b.call("GET", `/v1/sessions/${s.id}/agents/1000/${path}`);
+      assert.equal(gone.status, 400, path);
+      assert.match(gone.body.error.message, /no live session for child child-1/);
+    }
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}/agents/1000`)).status, 200);
     frames.stop();
     stream.stop();
+  } finally {
+    await b.stop();
+    await b.cleanup();
+  }
+});
+
+test("Prime child agent controls: message, cancel, thinking level, live transcript, retry worker", async () => {
+  const b = await boot();
+  try {
+    const s = await newSession(b);
+    const main = b.driver.agent([...b.driver.agents.keys()][0]);
+    main.kids = [{ agentId: 1000, id: "child-1", name: "worker-a", status: "running" }];
+    main.childEntries.set("child-1", [{ id: 1, conversationId: 1, kind: "pi.user", model: [{ role: "user", content: "child task", timestamp: 1 }] }]);
+    const kid = `/v1/sessions/${s.id}/agents/1000`;
+
+    // live transcript: the child's own events stream like the main agent's
+    const stream = b.tail(`${kid}/events`);
+    await stream.waitFor((f) => f.type === "snapshot", "child snapshot");
+    const child = main.childHandles.get("child-1")!;
+    const entry = { id: 2, conversationId: 1, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "working on it" }], timestamp: 2 }] } as never;
+    child.emit([{ type: "message_end", entry }]);
+    await stream.waitFor((f) => f.type === "batch" && f.events.some((e) => e.type === "message_end"), "child batch");
+
+    // composer: send_message to the child, never the main agent; dedup on requestId like any agent
+    const sent = await b.call("POST", `${kid}/messages`, { content: "also check the tests", requestId: "r1", whenBusy: "steer" });
+    assert.equal(sent.status, 202);
+    const again = await b.call("POST", `${kid}/messages`, { content: "also check the tests", requestId: "r1" });
+    assert.equal(again.body.submissionId, sent.body.submissionId);
+    assert.deepEqual(main.childMessages, [{ id: "child-1", content: "also check the tests", whenBusy: "steer" }]);
+    assert.equal(main.sends.length, 0);
+    assert.equal((await b.call("POST", `${kid}/messages`, { content: "x" })).status, 400, "requestId is still required");
+
+    // thinking level goes to the child's session; the model does not change
+    assert.equal((await b.call("PATCH", `${kid}/config`, { thinkingLevel: "high" })).body.thinkingLevel, "high");
+    assert.equal((await b.call("GET", `${kid}/config`)).body.thinkingLevel, "high");
+    assert.equal(main.config().thinkingLevel, "low", "the parent keeps its own");
+    const model = await b.call("PATCH", `${kid}/config`, { model: { provider: "fake", modelId: "echo" } });
+    assert.equal(model.status, 400);
+    assert.match(model.body.error.message, /keeps the model/);
+
+    // retry worker reaches the child's own session
+    assert.equal((await b.call("POST", `${kid}/retry-worker`, {})).status, 200);
+    assert.equal(main.childHandles.get("child-1")!.retries, 1);
+    assert.equal(main.retries, 0);
+
+    // cancel is cancel_rlm_child, and the roster shows the child as cancelled
+    const tree = b.tail("/v1/events");
+    assert.deepEqual((await b.call("POST", `${kid}/abort`, {})).body, { ok: true });
+    assert.deepEqual(main.cancelled, ["child-1"]);
+    assert.equal(main.aborts, 0, "the parent is not aborted");
+    await tree.waitFor((f) => f.type === "tree" && f.tree.sessions[0].agents.some((a) => a.id === 1000 && !a.busy), "child no longer running");
+    stream.stop();
+    tree.stop();
+  } finally {
+    await b.stop();
+    await b.cleanup();
+  }
+});
+
+test("retry-worker on the main agent calls the driver; a failure is the Prime error", async () => {
+  const b = await boot();
+  try {
+    const s = await newSession(b);
+    const main = b.driver.agent([...b.driver.agents.keys()][0]);
+    const url = `/v1/sessions/${s.id}/agents/1/retry-worker`;
+    assert.deepEqual((await b.call("POST", url, {})).body, { ok: true });
+    assert.deepEqual(await b.client.agent(s.id, 1).retryWorker(), { ok: true });
+    assert.equal(main.retries, 2);
+    main.retryError = "Session worker is stopping; retry after it finishes";
+    const failed = await b.call("POST", url, {});
+    assert.equal(failed.status, 503);
+    assert.match(failed.body.error.message, /worker is stopping/);
+    assert.equal((await b.call("POST", `/v1/sessions/${s.id}/agents/9/retry-worker`, {})).status, 404);
   } finally {
     await b.stop();
     await b.cleanup();

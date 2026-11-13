@@ -19,8 +19,14 @@ interface Locals {
   id: number;
 }
 
-// What Prime can serve for a child agent: its summary, transcript and entries, read-only. Everything else is a 400.
-const CHILD_READS = /^\/sessions\/[^/]+\/agents\/[^/]+(\/(events|entries|transcript))?\/?$/;
+// What Prime serves for a child agent; everything else is a 400. The summary needs no live session; the rest attach the child's.
+const CHILD = "/sessions/[^/]+/agents/[^/]+";
+const CHILD_SUMMARY = new RegExp(`^${CHILD}/?$`);
+const CHILD_ROUTES: [string, RegExp][] = [
+  ["GET", new RegExp(`^${CHILD}/(events|entries|transcript|config)/?$`)],
+  ["PATCH", new RegExp(`^${CHILD}/config/?$`)], // thinkingLevel only; the model is the child's own
+  ["POST", new RegExp(`^${CHILD}/(messages|abort|retry-worker)/?$`)],
+];
 
 const param = (req: Request, key: string) => String(req.params[key]);
 const unsupported = route(async () => {
@@ -39,11 +45,15 @@ export function v1(svc: Service) {
       next(e);
     }
   });
-  r.param("a", (req, res, next, value: string) => {
+  r.param("a", async (req, res, next, value: string) => {
     try {
       const target = svc.resolveAgent(param(req, "s"), value);
-      if (target.child && !(req.method === "GET" && CHILD_READS.test(req.path)))
-        throw invalid("Prime child agents are read-only here: only GET agent, events, entries and transcript");
+      if (target.child) {
+        const summary = req.method === "GET" && CHILD_SUMMARY.test(req.path);
+        if (!summary && !CHILD_ROUTES.some(([m, re]) => m === req.method && re.test(req.path)))
+          throw invalid("Not supported on a Prime child agent. It takes GET agent, events, entries, transcript and config, PATCH config (thinkingLevel), and POST messages, abort and retry-worker");
+        if (!summary) target.h = await svc.childHandle(target.row, target.child);
+      }
       Object.assign(res.locals, target);
       next();
     } catch (e) {
@@ -112,11 +122,11 @@ export function v1(svc: Service) {
   r.patch(a, unsupported);
   r.get(`${a}/events`, route((req, res) => agentStream(svc, L(res), req, res)));
   r.get(`${a}/entries`, route(async (req, res) => {
-    const source = await svc.agentEntries(L(res).row, L(res).id, L(res).child);
+    const source = svc.agentEntries(L(res).row, L(res).id);
     if (String(req.query.scope ?? "all") === "active") return void res.json({ items: JSON.parse(JSON.stringify(source)) });
     res.json(svc.entries(source, req.query.cursor as string | undefined, Number(req.query.limit ?? 500)));
   }));
-  r.get(`${a}/transcript`, route(async (req, res) => res.json(svc.transcript(await svc.agentEntries(L(res).row, L(res).id, L(res).child), String(req.query.format ?? "json")))));
+  r.get(`${a}/transcript`, route(async (req, res) => res.json(svc.transcript(svc.agentEntries(L(res).row, L(res).id), String(req.query.format ?? "json")))));
   r.post(
     `${a}/messages`,
     route(async (req, res) => {
@@ -132,6 +142,10 @@ export function v1(svc: Service) {
   r.get(`${a}/extensions`, route(async (_req, res) => res.json(await L(res).h.extensions())));
   r.patch(`${a}/extensions`, route(async (req, res) => res.json(await L(res).h.patchExtensions(req.body ?? {}))));
   r.post(`${a}/compact`, route(async (req, res) => res.json(await L(res).h.compact(typeof req.body?.instructions === "string" && req.body.instructions.trim() ? req.body.instructions : undefined))));
+  r.post(`${a}/retry-worker`, route(async (_req, res) => {
+    await L(res).h.retryWorker();
+    res.json({ ok: true });
+  }));
   r.post(`${a}/reset`, route(async (req, res) => res.json(await svc.reset(L(res).row, req.body?.note))));
   r.get(`${a}/docs/:kind`, unsupported);
   r.all(`${a}/demo/{*rest}`, unsupported);

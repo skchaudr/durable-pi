@@ -15,7 +15,7 @@ import {
 } from "lucide-vue-next";
 import DeviceIcon from "./DeviceIcon.vue";
 import type { TreeNode } from "@sdk/models";
-import { ago } from "../client/store";
+import { ago, network } from "../client/store";
 
 const props = defineProps<{
   node: TreeNode;
@@ -37,6 +37,12 @@ const background = computed(() =>
     : (agent.value?.background ?? 0),
 );
 const busy = computed(() => session.value?.busy || agent.value?.busy);
+/** Prime's child agents keep the name Prime gave them. */
+const renamable = computed(() => {
+  const node = props.node;
+  if (node.type !== "agent" || node.agent.kind !== "subagent") return true;
+  return network.devices.value.find((d) => d.id === node.deviceId)?.info?.durableVersion !== "prime";
+});
 const statusText = computed(() => {
   const d = device.value;
   if (!d) return "";
@@ -178,7 +184,7 @@ const title = computed(() => {
       <span v-if="background" class="bg-count" :title="`${background} background task(s)`"
         ><i class="dot bg" />{{ background }}</span
       >
-      <span class="acts" @click.stop>
+      <span v-if="renamable" class="acts" @click.stop>
         <button
           class="icon-button"
           :disabled="!online"

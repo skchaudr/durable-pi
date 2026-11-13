@@ -250,6 +250,10 @@ export class AgentHandle {
   compact(instructions?: string) {
     return this.client.request<{ taskId: number }>("POST", `${this.base}/compact`, { instructions });
   }
+  /** Prime only: ask Prime to recover this agent's session worker (its `retry_worker`), after a crash or a skipped revival. */
+  retryWorker() {
+    return this.client.request<{ ok: true }>("POST", `${this.base}/retry-worker`, {}, { timeoutMs: 70_000 });
+  }
   reset(note?: string) {
     return this.client.request<{ ok: true }>("POST", `${this.base}/reset`, { note });
   }

@@ -17,6 +17,8 @@ export interface SlashCommand {
   args?: string;
   description: string;
   run: (arg: string) => unknown | Promise<unknown>;
+  /** Also works on a Prime child agent; the rest are not offered there. */
+  child?: true;
 }
 
 const need = <T>(value: T | undefined, what: string): T => {
@@ -43,7 +45,7 @@ export const commands: SlashCommand[] = [
       notify("New context started.");
     },
   },
-  { name: "tasks", description: "Open the Tasks panel", run: () => showInspector("tasks") },
+  { name: "tasks", description: "Open the Tasks panel", run: () => showInspector("tasks"), child: true },
   {
     name: "new",
     args: "[name]",
@@ -103,17 +105,22 @@ export const commands: SlashCommand[] = [
       await refreshDetail();
       notify(`Thinking ${arg}. Used on the next turn.`);
     },
+    child: true,
   },
   {
     name: "help",
     description: "How this works, keys and commands",
     run: () => (ui.dialog = { kind: "help" }),
+    child: true,
   },
 ];
 
+/** The commands on offer: all of them, or on a Prime child agent only those that work there. */
+export const commandsFor = (child: boolean) => (child ? commands.filter((c) => c.child) : commands);
+
 /** `/name rest` → the command and its argument, or undefined when the text is not a known command. */
-export function parseCommand(text: string) {
+export function parseCommand(text: string, child = false) {
   const m = text.trim().match(/^\/(\S+)\s*([\s\S]*)$/);
-  const command = m && commands.find((c) => c.name === m[1]);
+  const command = m && commandsFor(child).find((c) => c.name === m[1]);
   return command ? { command, arg: m![2].trim() } : undefined;
 }

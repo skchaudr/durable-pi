@@ -166,6 +166,10 @@ export const sessionAgents = computed(() =>
 export const agentSummary = computed(() =>
   sessionAgents.value.find((a) => a.id === selected.value?.agentId),
 );
+/** A Prime child agent (an rlm.spawn worker): it takes messages, cancel and a thinking level; fork, rename, model and compaction do not apply. */
+export const primeChild = computed(
+  () => device.value?.info?.durableVersion === "prime" && agentSummary.value?.kind === "subagent",
+);
 export const activeLineage = computed(() =>
   selected.value ? lineage(sessionAgents.value, selected.value.agentId) : [],
 );
@@ -207,7 +211,8 @@ export const tasks = computed(() => {
 });
 export const busy = computed(
   () =>
-    agentState.value.running ||
+    // A child runs as long as Prime's roster says so, between its own turns too.
+    (primeChild.value ? agentSummary.value?.busy === true : agentState.value.running) ||
     tasks.value.some((t) => !t.effectiveBackground && t.conversationId === selected.value?.agentId),
 );
 export const usage = computed(() => sumUsage(agentState.value.usage));
@@ -313,7 +318,7 @@ export async function interrupt() {
   if (!busy.value || interrupting.value || !agentHandle.value) return;
   interrupting.value = true;
   const done = await attempt(() => agentHandle.value!.abort(false));
-  if (done) notify("Foreground work interrupted. Background jobs continue.");
+  if (done) notify(primeChild.value ? "Child cancelled." : "Foreground work interrupted. Background jobs continue.");
   interrupting.value = false;
 }
 

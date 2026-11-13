@@ -82,9 +82,19 @@ export class FakeAgent implements PrimeAgentHandle {
   async tools() {
     return [];
   }
-  /** Prime child agents: set `kids` and call `emitChildren()`. `childEntries` is what each child's transcript reads. */
+  /** Prime child agents: set `kids` and call `emitChildren()`. `childEntries` is the transcript of each child with a live session; `childHandles` are the handles openChild made. */
   kids: PrimeChild[] = [];
   childEntries = new Map<string, WireEntry[]>();
+  childHandles = new Map<string, FakeChild>();
+  /** What reached the children (send_message from this agent) and which were cancelled (cancel_rlm_child). */
+  childMessages: { id: string; content: string; whenBusy: WhenBusy }[] = [];
+  cancelled: string[] = [];
+  retries = 0;
+  retryError?: string;
+  async retryWorker() {
+    if (this.retryError) throw new ApiFault("unavailable", this.retryError);
+    this.retries++;
+  }
   private childListeners = new Set<() => void>();
   children() {
     return this.kids.map((k) => ({ ...k }));
@@ -96,10 +106,12 @@ export class FakeAgent implements PrimeAgentHandle {
   emitChildren() {
     for (const fn of [...this.childListeners]) fn();
   }
-  async childSnapshot(id: string) {
+  async openChild(id: string): Promise<FakeChild> {
     const entries = this.childEntries.get(id);
     if (!entries) throw invalid(`Prime has no live session for child ${id}`);
-    return { ...this.snapshot(), entries };
+    let child = this.childHandles.get(id);
+    if (!child) this.childHandles.set(id, (child = new FakeChild(this.owner, this, id, entries)));
+    return child;
   }
   tasks() {
     return { liveTasks: async () => [], terminalTasks: async () => [], abort: async () => { throw invalid("No task"); }, onChange: () => () => {} };
@@ -204,6 +216,35 @@ export class FakeAgent implements PrimeAgentHandle {
       { type: "run_end", inputs: [submission] },
       { type: "usage_changed", usage: { models: { "fake/echo": usage() }, tools: {} } },
     ]);
+  }
+}
+
+/** A child agent as acp-driver gives it: no turns of its own here (tests push events with `emit`), send is send_message from the parent, abort is cancel_rlm_child, the model is fixed. */
+export class FakeChild extends FakeAgent {
+  private n = 0;
+  constructor(
+    owner: FakeDriver,
+    readonly parent: FakeAgent,
+    readonly id: string,
+    entries: WireEntry[],
+  ) {
+    const { cwd, model, thinkingLevel } = parent.config();
+    super(owner, cwd!, model!, thinkingLevel);
+    this.entries = entries;
+  }
+  override async send(content: string, whenBusy: WhenBusy) {
+    this.parent.childMessages.push({ id: this.id, content, whenBusy });
+    return { submissionId: ++this.n };
+  }
+  override async abort() {
+    this.parent.cancelled.push(this.id);
+    const kid = this.parent.kids.find((k) => k.id === this.id);
+    if (kid) kid.status = "cancelled";
+    this.parent.emitChildren();
+  }
+  override async setConfig(patch: Partial<AgentConfig>) {
+    if (patch.model) throw invalid("A Prime child agent keeps the model it started with");
+    return super.setConfig(patch);
   }
 }
 
