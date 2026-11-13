@@ -38,7 +38,9 @@ class PrimeSession implements PrimeAgentHandle {
   private listeners = new Set<Listener>();
   private childListeners = new Set<() => void>();
   private agent: WireAgentState;
-  private autoCompaction = true; // the daemon's set_auto_compaction, kept for the sync session summary
+  private autoCompaction = true; // the daemon's auto-compaction flag, kept for the sync session summary
+  private readonly compStore: comp.CompactionStore = { backgroundTokens: 0 };
+  private backgroundFired = false; // the early compaction started for this crossing of the background line
   private submission = Date.now(); // ids only need to grow, also across backend restarts
 
   constructor(
@@ -79,6 +81,7 @@ class PrimeSession implements PrimeAgentHandle {
       ...(state.thinkingLevel ? { thinkingLevel: state.thinkingLevel } : {}),
       cwd: this.cwd,
     };
+    await comp.compaction(this.compactionCtx).catch(() => undefined); // caches the live values for the session summary's context bar
     this.translator = new Translator({ entries, agent: this.agent });
     for (const c of roster) this.translator.setChild(c as Record<string, unknown>);
     const buffered = this.buffered.filter((f) => (f.meta?.sequence ?? Infinity) > lastSeq);
@@ -122,6 +125,27 @@ class PrimeSession implements PrimeAgentHandle {
     }
     if (frame.event?.type === "rlm_child_update") for (const fn of [...this.childListeners]) fn();
     if (events.length) this.emit(events);
+    if (frame.event?.type === "agent_end") void this.compactInBackground();
+  }
+
+  /**
+   * dpi's backgroundTokens: once the context reaches window - reserveTokens - backgroundTokens and the agent is idle, compact once per
+   * crossing. shortcut: pi-durable compacts concurrently with the turn; this only compacts at idle (a turn boundary), and a follow-up
+   * that starts in the instant between the check and the command is aborted by Prime's compact; upgrade if that shows up.
+   */
+  private async compactInBackground() {
+    if (!this.compStore.backgroundTokens) return;
+    try {
+      const settings = await this.compaction();
+      const usage = (await this.client.request({ type: "get_connection_state", activeSessionId: this.activeId }))?.contextUsage;
+      const line = usage?.contextWindow - settings.reserveTokens - settings.backgroundTokens;
+      if (!settings.enabled || !(usage?.tokens >= line)) return void (this.backgroundFired = false);
+      if (this.backgroundFired || this.busy()) return;
+      this.backgroundFired = true;
+      await this.compact();
+    } catch (e) {
+      console.error(`[prime-backend] background compaction for ${this.primeSessionId}:`, e);
+    }
   }
 
   private emit(events: readonly WireAgentEvent[]) {
@@ -184,7 +208,7 @@ class PrimeSession implements PrimeAgentHandle {
   }
 
   private get compactionCtx(): comp.CompactionContext {
-    return { client: this.client, agentDir: dirname(this.sessionDir), activeSessionId: this.activeId, model: this.agent.model };
+    return { client: this.client, agentDir: dirname(this.sessionDir), activeSessionId: this.activeId, model: this.agent.model, store: this.compStore };
   }
   async compaction() {
     const out = await comp.compaction(this.compactionCtx).catch(fault);
@@ -193,7 +217,7 @@ class PrimeSession implements PrimeAgentHandle {
   }
   /** The same settings without asking the daemon: what the session summary carries so the page's context bar shows Prime's markers. */
   compactionNow() {
-    return comp.compactionSettings(dirname(this.sessionDir), this.agent.model, this.autoCompaction);
+    return comp.compactionSettings(dirname(this.sessionDir), this.agent.model, this.autoCompaction, this.compStore);
   }
   async setCompaction(patch: Record<string, unknown>) {
     const out = await comp.setCompaction(this.compactionCtx, patch).catch(fault);
