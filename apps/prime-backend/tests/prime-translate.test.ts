@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { WireAgentEvent } from "../../dpi-sdk/src/api.js";
 import { AgentModel } from "../../dpi-sdk/src/models.js";
+import { toMarkdown, toTranscript } from "../../dpi-sdk/src/transcript.js";
 import { Translator, messagesToEntries, parsePythonState } from "../src/prime/translate.js";
 
 const fixture = JSON.parse(readFileSync(new URL("../../dpi-sdk/tests/fixtures/agent-tool-turn.json", import.meta.url), "utf8"));
@@ -261,6 +262,37 @@ describe("python kernel notice", () => {
     const [end] = t.apply({ type: "message_end", message: { ...row, content: [{ type: "text", text: `${head} You have not defined any names yet.` }] } });
     assert.equal((end as Extract<WireAgentEvent, { type: "message_end" }>).entry.kind, "prime.python_state");
     assert.deepEqual((t.snapshot().entries[0].data as { defined: string[] }).defined, []);
+  });
+});
+
+describe("python kernel notice: Prime's injected names", () => {
+  const head = "[python-state]\n\nYour Python kernel persisted through compaction.";
+  it("leaves out Prime's own skills, keeping the user's variables", () => {
+    const text = `${head} These names are still defined: agent_message, agent_observe, attach_image, child, compact, edit, goal, refine, rlm_heartbeat, verify_alpha.`;
+    assert.deepEqual(parsePythonState(text), { defined: ["child", "verify_alpha"], pruned: [] });
+    const [e] = messagesToEntries([{ role: "custom", customType: "ipython_state", content: text, timestamp: 1 }]);
+    assert.equal((e.data as { text: string }).text, "Python kernel survived compaction (2 names defined).");
+    assert.deepEqual(parsePythonState(`${head} These names are still defined: agent_message, rlm_heartbeat.`), { defined: [], pruned: [] });
+  });
+});
+
+describe("agent messages", () => {
+  // Row shape: pa-core agent_messaging.rs create_agent_session_message_row; the kickoff task has the same shape.
+  const row = (details: object, content = "[agent-message from alpha]\n\nhello") => ({ role: "custom", customType: "agent_message", content, display: true, details, timestamp: 5 });
+  const fromMain = row({ id: "agentmsg_1", message: "also check the tests", from: { sessionName: "main-name" }, fromRelationship: "parent" }, "[task from parent]\n\nalso check the tests");
+
+  it("a message from the main session shows as 'From Main: ...' in history, live and the markdown transcript", () => {
+    const [h] = messagesToEntries([fromMain]);
+    assert.deepEqual([h.kind, h.model, h.data], ["prime.agent_message", undefined, { text: "From Main: also check the tests" }]);
+    const t = new Translator({ entries: [], agent: {} });
+    const [end] = t.apply({ type: "message_end", message: fromMain });
+    assert.deepEqual((end as Extract<WireAgentEvent, { type: "message_end" }>).entry.data, { text: "From Main: also check the tests" });
+    assert.equal(toMarkdown(toTranscript(t.snapshot().entries)).trim(), "_From Main: also check the tests_");
+  });
+
+  it("a reply from a child names the child; without details it falls back to the content", () => {
+    assert.equal((messagesToEntries([row({ message: "done", from: { sessionName: "worker-a" }, fromRelationship: "child" })])[0].data as { text: string }).text, "From worker-a: done");
+    assert.equal((messagesToEntries([row({})])[0].data as { text: string }).text, "From another agent: [agent-message from alpha]\n\nhello");
   });
 });
 

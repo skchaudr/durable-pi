@@ -89,7 +89,7 @@ export function v1(svc: Service) {
   r.get("/archived", (_req, res) => res.json(svc.archived()));
   r.post("/archived/:id/restore", route(async (req, res) => res.json(await svc.unarchive(String(req.params.id)))));
   r.get("/sessions/:s/compaction", route(async (_req, res) => res.json(await svc.handle(L(res).row).compaction())));
-  r.patch("/sessions/:s/compaction", route(async (req, res) => res.json(await svc.handle(L(res).row).setCompaction(req.body ?? {}))));
+  r.patch("/sessions/:s/compaction", route(async (req, res) => res.json(await svc.setCompaction(L(res).row, req.body ?? {}))));
   r.get("/sessions/:s/events", (_req, res, next) => {
     try {
       sessionStream(svc, L(res).row, res);

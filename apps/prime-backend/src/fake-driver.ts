@@ -238,10 +238,24 @@ export class FakeChild extends FakeAgent {
     this.parent.childMessages.push({ id: this.id, content, whenBusy });
     return { submissionId: ++this.n };
   }
+  /** Like the child's Translator: busy between a pushed run_start and run_end, whatever the roster says. */
+  private live = false;
+  override emit(events: WireAgentEvent[]) {
+    for (const e of events) if (e.type === "run_start" || e.type === "run_end") this.live = e.type === "run_start";
+    super.emit(events);
+  }
+  override busy() {
+    return this.live;
+  }
+  /** cancel_rlm_child while the roster says running; Prime cancels nothing else, so a child on a follow-up is aborted on its own session. */
   override async abort() {
-    this.parent.cancelled.push(this.id);
     const kid = this.parent.kids.find((k) => k.id === this.id);
-    if (kid) kid.status = "cancelled";
+    if (kid?.status !== "running") {
+      this.aborts++;
+      return this.emit(this.live ? [{ type: "run_end", inputs: [] }] : []);
+    }
+    this.parent.cancelled.push(this.id);
+    kid.status = "cancelled";
     this.parent.emitChildren();
   }
   override async setConfig(patch: Partial<AgentConfig>) {

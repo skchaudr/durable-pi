@@ -20,6 +20,7 @@ const cmds = (type: string) => seen.filter((c) => c.type === type);
 let client: net.Socket | undefined;
 let childActive = "C1"; // what the roster says the child is attached as
 let cancelError: string | undefined;
+let cancelled = true; // Prime's answer to cancel_rlm_child: false for a child whose task is already settled
 
 function answer(cmd: any): { data?: unknown; error?: string } {
   const on = cmd.activeSessionId;
@@ -33,9 +34,11 @@ function answer(cmd: any): { data?: unknown; error?: string } {
     case "get_rlm_children":
       return { data: { children: on === "A1" ? [{ id: "child-1", sessionName: "worker-a", status: "running", activeSessionId: childActive, model: "p/kid-model" }] : [] } };
     case "cancel_rlm_child":
-      return cancelError ? { error: cancelError } : { data: { cancelled: true } };
+      return cancelError ? { error: cancelError } : { data: { cancelled } };
     case "send_message":
+    case "abort":
     case "set_thinking_level":
+    case "set_model":
     case "retry_worker":
     case "detach":
       return { data: null };
@@ -126,12 +129,21 @@ test("abort is cancel_rlm_child on the parent; Prime's refusal is a 400", async 
   cancelError = undefined;
 });
 
+test("abort on a child Prime will not cancel (it finished its task and is on a follow-up) aborts its own session", async () => {
+  const child = await parent.openChild("child-1");
+  cancelled = false;
+  const before = seen.length;
+  await child.abort();
+  cancelled = true;
+  assert.deepEqual(seen.slice(before).map((c) => [c.type, c.activeSessionId]), [["cancel_rlm_child", "A1"], ["abort", "C1"]]);
+});
+
 test("thinking level goes to the child's session and shows in its snapshot; the model is refused", async () => {
   const child = await parent.openChild("child-1");
   const got: WireAgentEvent[] = [];
   child.subscribe((e) => got.push(...e));
   assert.equal((await child.setConfig({ thinkingLevel: "high" })).thinkingLevel, "high");
-  assert.deepEqual(cmds("set_thinking_level"), [{ type: "set_thinking_level", activeSessionId: "C1", level: "high" }]);
+  assert.deepEqual(cmds("set_thinking_level"), [{ type: "set_thinking_level", activeSessionId: "C1", level: "high", persist: false }]);
   assert.deepEqual(got.map((e) => e.type), ["agent_changed"]);
   assert.equal(child.snapshot().agent.thinkingLevel, "high");
   assert.equal(parent.config().thinkingLevel, "low");
@@ -155,4 +167,10 @@ test("when the roster gives the child a new active session, the next openChild r
   push("C1", { type: "agent_start" });
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(old.busy(), false, "the old session no longer receives events");
+});
+
+test("model and thinking level changes are session-only: persist is false on both requests", async () => {
+  await parent.setConfig({ model: { provider: "p", modelId: "m2" }, thinkingLevel: "high" });
+  assert.deepEqual(cmds("set_model").at(-1), { type: "set_model", activeSessionId: "A1", provider: "p", modelId: "m2", persist: false });
+  assert.deepEqual(cmds("set_thinking_level").at(-1), { type: "set_thinking_level", activeSessionId: "A1", level: "high", persist: false });
 });

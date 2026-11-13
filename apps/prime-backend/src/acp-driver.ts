@@ -23,6 +23,12 @@ export interface DriverOptions extends ClientOptions {
   connectAttempts?: number;
 }
 
+/**
+ * The thinking level and model changes are this session's only, not the global settings.json default. Prime's opt-out field is
+ * `persist` (pa-daemon setting_switches.rs persist_requested; the name may still change): one line to rename. A daemon that does not know it ignores it.
+ */
+const SESSION_ONLY = { persist: false };
+
 type Listener = (events: readonly WireAgentEvent[]) => void;
 
 const fault = (e: unknown): never => {
@@ -327,8 +333,11 @@ class PrimeSession implements PrimeAgentHandle {
 
   async abort() {
     try {
-      if (this.child) await this.client.request({ type: "cancel_rlm_child", activeSessionId: this.child.parent.activeId, childId: this.child.id });
-      else await this.client.request({ type: "abort", activeSessionId: this.activeId });
+      if (this.child) {
+        const out = await this.client.request({ type: "cancel_rlm_child", activeSessionId: this.child.parent.activeId, childId: this.child.id });
+        // Prime cancels only a child whose task is unsettled (rlm_children/registry.rs cancel_child_run); one on a follow-up after it finished answers `cancelled: false`, and its own session is aborted instead.
+        if (out?.cancelled === false) await this.client.request({ type: "abort", activeSessionId: this.activeId });
+      } else await this.client.request({ type: "abort", activeSessionId: this.activeId });
     } catch (e) {
       fault(e);
     }
@@ -341,11 +350,11 @@ class PrimeSession implements PrimeAgentHandle {
     if (patch.cwd !== undefined && patch.cwd !== this.cwd) throw invalid("A Prime session cannot change its working folder");
     try {
       if (patch.model) {
-        await this.client.request({ type: "set_model", activeSessionId: this.activeId, provider: patch.model.provider, modelId: patch.model.modelId });
+        await this.client.request({ type: "set_model", activeSessionId: this.activeId, provider: patch.model.provider, modelId: patch.model.modelId, ...SESSION_ONLY });
         this.agent = { ...this.agent, model: patch.model };
       }
       if (patch.thinkingLevel) {
-        await this.client.request({ type: "set_thinking_level", activeSessionId: this.activeId, level: patch.thinkingLevel });
+        await this.client.request({ type: "set_thinking_level", activeSessionId: this.activeId, level: patch.thinkingLevel, ...SESSION_ONLY });
         this.agent = { ...this.agent, thinkingLevel: patch.thinkingLevel };
       }
     } catch (e) {

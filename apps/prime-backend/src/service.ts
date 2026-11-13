@@ -306,7 +306,8 @@ export class Service {
       busy: this.handles.get(key(row.id, a.id))?.busy() ?? false,
       background: 0,
     }));
-    const kids = h.children().map((c): AgentSummary => ({ id: c.agentId, name: c.name, named: false, kind: "subagent", ownerAgentId: MAIN_AGENT, busy: c.status === "running", background: 0 }));
+    // A follow-up to a finished child leaves its roster status "done" while it works, so its live turn (its own handle, once attached) counts too.
+    const kids = h.children().map((c): AgentSummary => ({ id: c.agentId, name: c.name, named: false, kind: "subagent", ownerAgentId: MAIN_AGENT, busy: c.status === "running" || (this.handles.get(key(row.id, c.agentId))?.busy() ?? false), background: 0 }));
     return [{ id: MAIN_AGENT, name: "Main", named: false, kind: "root", busy: h.busy(), background: 0 }, ...others, ...kids];
   }
 
@@ -401,6 +402,13 @@ export class Service {
     return config;
   }
 
+  /** The context bar's markers ride the tree, so a compaction change must reach the hub like any config change. */
+  async setCompaction(row: SessionRow, patch: Record<string, unknown>) {
+    const out = await this.handle(row).setCompaction(patch);
+    this.notify();
+    return out;
+  }
+
   /** Prime's new_session starts a new session file; the catalog follows it so a backend restart reopens the new one. */
   async reset(row: SessionRow, note: unknown) {
     if (typeof note === "string" && note.trim()) throw invalid("Prime has no handoff note on a new session");
@@ -452,7 +460,18 @@ export class Service {
   /** A Prime child's live handle (attached on first use). It is kept under the child's agent id, so send, configure and abort reach it like any agent's. */
   async childHandle(row: SessionRow, child: PrimeChild): Promise<PrimeAgentHandle> {
     const h = await this.handle(row).openChild(child.id);
-    this.handles.set(key(row.id, child.agentId), h);
+    const k = key(row.id, child.agentId);
+    if (this.handles.get(k) !== h) {
+      // Its run flips change the tree like a main agent's: child busy comes from here, not only the roster.
+      this.unsubs.get(k)?.();
+      this.handles.set(k, h);
+      this.unsubs.set(
+        k,
+        h.subscribe((events) => {
+          if (events.some((e) => e.type === "run_start" || e.type === "run_end" || e.type === "snapshot")) this.notify();
+        }),
+      );
+    }
     return h;
   }
 
