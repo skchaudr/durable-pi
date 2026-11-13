@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import {
   Activity,
   Ban,
@@ -9,18 +10,44 @@ import {
   Layers,
   LoaderCircle,
   Octagon,
+  RotateCcw,
+  SquareTerminal,
   Wrench,
   X,
 } from "lucide-vue-next";
 import type { ScriptCall } from "@sdk/api";
 import type { TranscriptItem, ToolCallView } from "@sdk/transcript";
 import { markdown } from "../client/markdown";
-import { json } from "../client/store";
+import { device, json } from "../client/store";
 import { now, runByCall, runById, seconds } from "../client/jobs";
 import JobCard from "./JobCard.vue";
 
 defineProps<{ item: TranscriptItem }>();
 const emit = defineEmits<{ fork: [entryId: number] }>();
+// The revival and python-state cards are Prime's own; other devices never emit those kinds.
+const prime = computed(() => device.value?.info?.durableVersion === "prime");
+// Prime's revival_event JSON (pa-daemon revival_event.rs): which fields exist depends on `type`.
+interface Revival {
+  type?: string;
+  outcome?: string;
+  reason?: string;
+  restarts?: number;
+  failure?: number;
+  maxFailures?: number;
+  at?: string;
+  interruptedToolCalls?: { toolCallId: string; toolName: string; started?: boolean }[];
+}
+const revival = (item: TranscriptItem) => ((item as { data?: { event?: Revival } }).data?.event ?? {}) as Revival;
+const revivalTitle = (e: Revival) =>
+  e.type === "worker_restarted"
+    ? "Session worker restarted after a crash"
+    : e.type === "revival_continued"
+      ? "Interrupted turn continued after a restart"
+      : e.outcome === "skipped"
+        ? "Session not revived"
+        : "Session revived after a crash";
+const pythonState = (item: TranscriptItem) =>
+  ((item as { data?: { defined?: string[]; pruned?: string[] } }).data ?? {}) as { defined?: string[]; pruned?: string[] };
 const statusLabel = (call: ToolCallView) =>
   call.status === "error" ? "Error" : call.status === "done" ? "Done" : call.status;
 // A codemode call: its script is the argument worth previewing, and its nested calls render as a list.
@@ -216,6 +243,43 @@ const entryClass = (item: TranscriptItem) =>
       v-else-if="item.entryKind === 'demo.job' && runById((item.data as { taskId: number }).taskId)"
       :run="runById((item.data as { taskId: number }).taskId)!"
     />
+    <div v-else-if="prime && item.kind === 'event' && item.entryKind === 'prime.revival'" class="prime-card revival-card">
+      <div class="prime-card-title">
+        <RotateCcw :size="18" /><strong>{{ revivalTitle(revival(item)) }}</strong>
+        <span v-if="revival(item).failure !== undefined" class="prime-card-meta"
+          >failure {{ revival(item).failure }}<template v-if="revival(item).maxFailures !== undefined">/{{ revival(item).maxFailures }}</template></span
+        ><span v-else-if="revival(item).restarts" class="prime-card-meta">restarts {{ revival(item).restarts }}</span
+        ><span v-if="revival(item).at" class="prime-card-meta">{{ revival(item).at }}</span>
+      </div>
+      <div v-if="revival(item).reason" class="prime-card-body">{{ revival(item).reason }}</div>
+      <ul v-if="revival(item).interruptedToolCalls?.length" class="prime-card-calls">
+        <li v-for="c in revival(item).interruptedToolCalls" :key="c.toolCallId">
+          <code>{{ c.toolName }}</code
+          ><span class="prime-chip" :class="c.started ? 'chip-started' : 'chip-never'">{{
+            c.started ? "started" : "never started"
+          }}</span>
+        </li>
+      </ul>
+    </div>
+    <div v-else-if="prime && item.kind === 'event' && item.entryKind === 'prime.python_state'" class="prime-card python-card">
+      <div class="prime-card-title">
+        <SquareTerminal :size="18" /><strong>Python kernel survived compaction</strong>
+      </div>
+      <div class="prime-card-body">
+        <template v-if="pythonState(item).defined?.length"
+          >Still defined:
+          <span class="prime-chips"
+            ><code v-for="n in pythonState(item).defined" :key="n" class="prime-chip">{{ n }}</code></span
+          ></template
+        ><template v-else-if="pythonState(item).defined">No names defined yet.</template>
+      </div>
+      <div v-if="pythonState(item).pruned?.length" class="prime-card-body">
+        Removed (over the per-variable snapshot limit):
+        <span class="prime-chips"
+          ><code v-for="n in pythonState(item).pruned" :key="n" class="prime-chip chip-pruned">{{ n }}</code></span
+        >
+      </div>
+    </div>
     <template v-else
       ><div class="event-line">
         <Braces v-if="item.entryKind === 'demo.state-change'" :size="18" /><Layers

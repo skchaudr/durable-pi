@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { WireAgentEvent } from "../../dpi-sdk/src/api.js";
 import { AgentModel } from "../../dpi-sdk/src/models.js";
-import { Translator, messagesToEntries } from "../src/prime/translate.js";
+import { Translator, messagesToEntries, parsePythonState } from "../src/prime/translate.js";
 
 const fixture = JSON.parse(readFileSync(new URL("../../dpi-sdk/tests/fixtures/agent-tool-turn.json", import.meta.url), "utf8"));
 const fixtureEvents: WireAgentEvent[] = fixture.frames.flatMap((f: { type: string; events?: WireAgentEvent[] }) => (f.type === "batch" ? f.events! : []));
@@ -234,6 +234,33 @@ describe("revival events", () => {
       ["prime.revival", "Prime did not revive this session: its busy evidence is stale"],
       ["prime.revival", "Session worker crashed and was restarted (2/5)."],
     ]);
+  });
+});
+
+describe("python kernel notice", () => {
+  // Sentences from pa-core ipython_state.rs notice_content: header, persistence, then the pruned sentence, then the names sentence.
+  const head = "[python-state]\n\nYour Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available.";
+  const pruned = " Variables above the per-variable snapshot limit were removed: big, df2.";
+
+  it("parses defined and pruned names", () => {
+    assert.deepEqual(parsePythonState(`${head}${pruned} These names are still defined: a, b, np.`), { defined: ["a", "b", "np"], pruned: ["big", "df2"] });
+    assert.deepEqual(parsePythonState(`${head} These names are still defined: a.`), { defined: ["a"], pruned: [] });
+    assert.deepEqual(parsePythonState(`${head}${pruned} You have not defined any names yet.`), { defined: [], pruned: ["big", "df2"] });
+    assert.deepEqual(parsePythonState(`${head} You have not defined any names yet.`), { defined: [], pruned: [] });
+    assert.deepEqual(parsePythonState(head), { pruned: [] }); // listing failed: no names sentence
+    assert.deepEqual(parsePythonState(`${head}${pruned}`), { pruned: ["big", "df2"] });
+  });
+
+  it("history and live rows become prime.python_state with no raw message", () => {
+    const row = { role: "custom", customType: "ipython_state", content: `${head}${pruned} These names are still defined: a, b.`, display: false, timestamp: 1 };
+    const [e] = messagesToEntries([row]);
+    assert.equal(e.kind, "prime.python_state");
+    assert.equal(e.model, undefined);
+    assert.deepEqual(e.data, { text: "Python kernel survived compaction (2 names defined).", defined: ["a", "b"], pruned: ["big", "df2"] });
+    const t = new Translator({ entries: [], agent: {} });
+    const [end] = t.apply({ type: "message_end", message: { ...row, content: [{ type: "text", text: `${head} You have not defined any names yet.` }] } });
+    assert.equal((end as Extract<WireAgentEvent, { type: "message_end" }>).entry.kind, "prime.python_state");
+    assert.deepEqual((t.snapshot().entries[0].data as { defined: string[] }).defined, []);
   });
 });
 
