@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { DaemonClient } from "../src/prime/client.js";
+import { DaemonClient, PrimeError } from "../src/prime/client.js";
 import { launchEnv } from "../src/prime/env.js";
 import { PrimeTasks, cronItem, goalItem, taskNode, taskOutcome, type Daemon } from "../src/prime/tasks.js";
 
@@ -23,19 +23,28 @@ class Fake extends EventEmitter implements Daemon {
   goal: any = { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 };
   sent: any[] = [];
   goals = 0;
+  /** ms before a `/goal` start shows in get_connection_state: the worker runs the command after it accepts the prompt. */
+  goalDelay = 0;
   async request(c: any) {
     this.sent.push(c);
     switch (c.type) {
       case "cron_list": return { jobs: this.jobs };
       case "get_connection_state": return { goal: this.goal };
-      case "cron_add": { const j = job({ id: "new1", prompt: c.prompt, schedule: { kind: "once", expression: c.schedule } }); this.jobs.push(j); return { job: j }; }
-      case "heartbeat_set": { const j = job({ id: "hb1", source: "heartbeat", prompt: c.prompt, schedule: { kind: "interval", expression: c.schedule } }); this.jobs.push(j); return { heartbeat: j }; }
+      case "cron_add": { const j = job({ id: `new${this.jobs.length + 1}`, prompt: c.prompt, schedule: { kind: "once", expression: c.schedule } }); this.jobs.push(j); return { job: j }; }
+      case "heartbeat_set": { const j = job({ id: "hb1", source: "heartbeat", prompt: c.prompt, schedule: { kind: "interval", expression: c.schedule }, ...(c.deliveryMode ? { deliveryMode: c.deliveryMode } : {}) }); this.jobs.push(j); return { heartbeat: j }; }
       case "cron_cancel": this.jobs.forEach((j) => j.id === c.jobId && (j.status = "cancelled")); return {};
-      case "heartbeat_manage": this.jobs.forEach((j) => j.id === c.jobId && (j.status = "cancelled")); return {};
-      case "prompt":
-        if (c.message.startsWith("/goal clear")) this.goal = { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 };
-        else this.goal = goal({ goalId: `g${++this.goals}`, objective: c.message.replace(/^\/goal (--budget \d+ )?/, "") });
+      case "heartbeat_manage": this.jobs.forEach((j) => j.id === c.jobId && (j.status = c.action === "stop" ? "cancelled" : c.action === "pause" ? "paused" : "active")); return {};
+      case "prompt": {
+        const run = () => {
+          if (c.message.startsWith("/goal clear")) this.goal = { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 };
+          else if (c.message === "/goal pause" || c.message === "/goal resume") this.goal = { ...this.goal, status: c.message === "/goal pause" ? "paused" : "active" };
+          else this.goal = goal({ goalId: `g${++this.goals}`, objective: c.message.replace(/^\/goal (--budget \d+ )?/, "") });
+        };
+        if (this.goalDelay < 0) return undefined;
+        if (this.goalDelay) setTimeout(run, this.goalDelay);
+        else run();
         return undefined;
+      }
     }
     throw Error(`unexpected ${c.type}`);
   }
@@ -199,6 +208,163 @@ test("onChange polls when no event arrives", async () => {
   assert.ok(fired > base);
 });
 
+// ------------------------------------------------------------------ the Prime work panel
+
+test("work: goal with budget, the heartbeat, and live schedules only (cancelled and idle goals are absent)", async () => {
+  const d = new Fake();
+  const t = new PrimeTasks(d, "s");
+  assert.deepEqual(await t.work(), { goal: null, heartbeat: null, schedules: [] });
+  d.goal = goal({ tokenBudget: 0, status: "budget_limited", lastReason: "token budget reached" });
+  d.jobs = [job({ id: "a" }), job({ id: "b", status: "cancelled" }), job({ id: "hb", source: "heartbeat", status: "paused", deliveryMode: "follow_up", nextRunAt: undefined }), job({ id: "c", status: "paused" })];
+  const w = await t.work();
+  assert.deepEqual(w.goal, { status: "budget_limited", objective: "ship the thing", tokensUsed: 10, timeUsedSeconds: 3, continuationsUsed: 1, reason: "token budget reached" });
+  assert.deepEqual(w.heartbeat, { id: "hb", status: "paused", schedule: "every 5m", prompt: "check the build\nand report", runCount: 0, deliveryMode: "follow_up" });
+  assert.deepEqual(w.schedules.map((j) => [j.id, j.status]), [["a", "active"], ["c", "paused"]]);
+  assert.equal(w.schedules[0].nextRunAt, "2026-11-11T10:05:00.000Z");
+  d.goal = goal({});
+  assert.equal((await t.work()).goal?.tokenBudget, 1000);
+});
+
+test("goal commands go through the composer's send path and report queued; without it they are plain prompts", async () => {
+  const d = new Fake();
+  const sent: string[] = [];
+  let busy = false;
+  const send = async (message: string) => {
+    sent.push(message);
+    if (!busy) await d.request({ type: "prompt", message }); // idle: the composer's send reaches the daemon
+    return { queued: busy };
+  };
+  const t = new PrimeTasks(d, "s", { send });
+  assert.deepEqual(await t.runJob("prime.goal", { objective: "ship it", tokenBudget: 99 }), { taskId: 1 });
+  assert.deepEqual(sent, ["/goal --budget 99 ship it"]);
+  busy = true;
+  assert.deepEqual(await t.goalCommand("pause"), { queued: true });
+  assert.deepEqual(sent.at(-1), "/goal pause");
+  // queued: the goal start answers at once instead of waiting for a goal that has not begun
+  assert.deepEqual(await t.runJob("prime.goal", { objective: "later" }), { taskId: 0, queued: true });
+  assert.equal(sent.at(-1), "/goal later");
+  await assert.rejects(t.goalCommand("stop" as never), { code: "invalid" });
+  const plain = new PrimeTasks(d, "s");
+  assert.deepEqual(await plain.goalCommand("resume"), { queued: false });
+  assert.deepEqual(d.sent.at(-1), { type: "prompt", message: "/goal resume", activeSessionId: "s" });
+});
+
+test("goal pause/resume need a goal; clear leaves an aborted outcome, even for a finished goal", async () => {
+  const d = new Fake();
+  const t = new PrimeTasks(d, "s");
+  await assert.rejects(t.goalCommand("pause"), { code: "conflict" });
+  await t.runJob("prime.goal", { objective: "x" });
+  await t.goalCommand("pause");
+  assert.equal((await t.work()).goal?.status, "paused");
+  await t.goalCommand("resume");
+  assert.equal((await t.work()).goal?.status, "active");
+  await t.goalCommand("clear");
+  assert.equal((await t.work()).goal, null);
+  assert.deepEqual((await t.terminalTasks(5)).map((o) => o.state.outcome?.status), ["aborted"]);
+});
+
+test("a goal start waits for the worker to run /goal, then answers with its task id", async () => {
+  const d = new Fake();
+  d.goalDelay = 350; // two or three polls
+  const t = new PrimeTasks(d, "s");
+  const { taskId } = await t.runJob("prime.goal", { objective: "slow start" });
+  assert.equal((await t.work()).goal?.objective, "slow start");
+  assert.deepEqual((await t.liveTasks()).map((n) => n.id), [taskId]);
+});
+
+test("a goal that never shows fails with a chat pointer instead of hanging", async () => {
+  const d = new Fake();
+  d.goalDelay = -1; // the command never takes effect
+  const t = new PrimeTasks(d, "s");
+  const started = Date.now();
+  await assert.rejects(t.runJob("prime.goal", { objective: "nope" }), { message: /did not start the goal/ });
+  assert.ok(Date.now() - started >= 4000);
+});
+
+test("heartbeat: set carries deliveryMode and returns the job id; pause, resume and stop use heartbeat_manage", async () => {
+  const d = new Fake();
+  const t = new PrimeTasks(d, "s");
+  const { jobId } = await t.runJob("prime.heartbeat", { schedule: "every 2h", prompt: "beat", deliveryMode: "follow_up" });
+  assert.equal(jobId, "hb1");
+  assert.equal(d.sent.find((c) => c.type === "heartbeat_set").deliveryMode, "follow_up");
+  assert.equal((await t.work()).heartbeat?.deliveryMode, "follow_up");
+  await t.heartbeatAction("hb1", "pause");
+  assert.equal((await t.work()).heartbeat?.status, "paused");
+  await t.heartbeatAction("hb1", "resume");
+  assert.equal((await t.work()).heartbeat?.status, "active");
+  assert.deepEqual(d.sent.filter((c) => c.type === "heartbeat_manage").map((c) => c.action), ["pause", "resume"]);
+  await t.heartbeatAction("hb1", "stop");
+  assert.equal((await t.work()).heartbeat, null);
+  await assert.rejects(t.heartbeatAction("hb1", "pause"), { code: "not_found" }); // stopped
+  await assert.rejects(t.heartbeatAction("hb1", "kill" as never), { code: "invalid" });
+});
+
+test("heartbeat ids are not schedule ids: cancelSchedule and editSchedule refuse them and unknown ids", async () => {
+  const d = new Fake();
+  d.jobs = [job({ id: "hb", source: "heartbeat" }), job({ id: "s1" })];
+  const t = new PrimeTasks(d, "s");
+  await assert.rejects(t.cancelSchedule("hb"), { code: "not_found" });
+  await assert.rejects(t.cancelSchedule("zzz"), { code: "not_found" });
+  await assert.rejects(t.editSchedule("hb", { schedule: "in 1h", prompt: "p" }), { code: "not_found" });
+  await assert.rejects(t.heartbeatAction("s1", "pause"), { code: "not_found" });
+  assert.equal(d.sent.some((c) => c.type === "cron_cancel" || c.type === "heartbeat_manage"), false);
+  await t.cancelSchedule("s1");
+  assert.deepEqual((await t.work()).schedules, []);
+});
+
+test("editSchedule adds the new schedule, then cancels the old one: the id changes; a bad edit leaves the old", async () => {
+  const d = new Fake();
+  d.jobs = [job({ id: "old" })];
+  const t = new PrimeTasks(d, "s");
+  const out = await t.editSchedule("old", { schedule: "every 1h", prompt: "new prompt" });
+  assert.equal(out.replaced, "old");
+  assert.notEqual(out.jobId, "old");
+  assert.deepEqual(d.sent.filter((c) => c.type === "cron_add" || c.type === "cron_cancel").map((c) => [c.type, c.jobId ?? c.schedule]), [["cron_add", "every 1h"], ["cron_cancel", "old"]]);
+  const w = await t.work();
+  assert.deepEqual(w.schedules.map((j) => [j.id, j.schedule, j.prompt]), [[out.jobId, "every 1h", "new prompt"]]);
+  const before = d.sent.length;
+  await assert.rejects(t.editSchedule(out.jobId, { schedule: "every 1h", prompt: "  " }), { code: "invalid" });
+  assert.equal(d.sent.slice(before).some((c) => c.type === "cron_add" || c.type === "cron_cancel"), false);
+  assert.equal((await t.work()).schedules.length, 1);
+});
+
+test("a failed cancel after the add says both ids", async () => {
+  const d = new Fake();
+  d.jobs = [job({ id: "old" })];
+  const real = d.request.bind(d);
+  d.request = async (c: any) => {
+    if (c.type === "cron_cancel") throw new PrimeError("cancel refused", "cron_cancel");
+    return real(c);
+  };
+  const t = new PrimeTasks(d, "s");
+  await assert.rejects(t.editSchedule("old", { schedule: "in 1h", prompt: "p" }), { message: /Added schedule new\d, but cancelling old failed: cancel refused/ });
+});
+
+test("a goal_update with new usage reaches listeners and workNow without a daemon read; a status change refreshes", async () => {
+  const d = new Fake();
+  d.goal = goal({});
+  const t = new PrimeTasks(d, "s", { pollMs: 3_600_000 });
+  await t.refresh();
+  let fired = 0;
+  const off = t.onChange(() => fired++);
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+  await settle();
+  const base = fired;
+  const reads = () => d.sent.filter((c) => c.type === "get_connection_state").length;
+  const before = reads();
+  d.emit("session_event", { activeSessionId: "s", event: { type: "goal_update", goal: goal({ tokensUsed: 500 }) } });
+  await settle();
+  assert.equal(fired, base + 1);
+  assert.equal(t.workNow().goal?.tokensUsed, 500);
+  assert.equal(reads(), before);
+  d.goal = goal({ status: "complete", tokensUsed: 900 });
+  d.emit("session_event", { activeSessionId: "s", event: { type: "goal_update", goal: d.goal } });
+  await settle();
+  assert.equal(t.workNow().goal?.status, "complete");
+  assert.ok(reads() > before);
+  off();
+});
+
 // ------------------------------------------------------------------ integration
 
 const BIN = process.env.PRIME_PA_DAEMON ?? "/Volumes/Mini-SSD/offload/repos/prime-agent-durable/target/release/pa-daemon";
@@ -243,6 +409,28 @@ test("integration: cron_add shows up live, abort moves it to terminal (isolated 
     assert.deepEqual(done.map((o) => [o.id, o.state.outcome?.status]), [[taskId, "aborted"], [hb.taskId, "aborted"]]);
     assert.equal(tasks.jobRunsDoc().items[String(taskId)].status, "aborted");
     assert.equal(tasks.jobRunsDoc().items[String(hb.taskId)].status, "aborted");
+
+    // The Prime work panel against the real daemon: shapes, heartbeat pause/resume/stop, schedule edit and cancel.
+    assert.deepEqual(await tasks.work(), { goal: null, heartbeat: null, schedules: [] });
+    const first = await tasks.runJob("prime.schedule", { schedule: "at 2099-01-01T00:00:00Z", prompt: "first" });
+    const beat = await tasks.runJob("prime.heartbeat", { schedule: "every 24h", prompt: "beat", deliveryMode: "follow_up" });
+    let w = await tasks.work();
+    assert.deepEqual(w.schedules.map((j) => [j.id, j.schedule, j.prompt, j.status]), [[first.jobId, "at 2099-01-01T00:00:00Z", "first", "active"]]);
+    assert.deepEqual([w.heartbeat?.id, w.heartbeat?.schedule, w.heartbeat?.prompt, w.heartbeat?.deliveryMode], [beat.jobId, "every 24h", "beat", "follow_up"]);
+    assert.ok(w.heartbeat?.nextRunAt);
+    await tasks.heartbeatAction(beat.jobId!, "pause");
+    assert.equal((await tasks.work()).heartbeat?.status, "paused");
+    await tasks.heartbeatAction(beat.jobId!, "resume");
+    assert.equal((await tasks.work()).heartbeat?.status, "active");
+    const edited = await tasks.editSchedule(first.jobId!, { schedule: "at 2099-02-01T00:00:00Z", prompt: "second" });
+    assert.notEqual(edited.jobId, first.jobId);
+    w = await tasks.work();
+    assert.deepEqual(w.schedules.map((j) => [j.id, j.schedule, j.prompt]), [[edited.jobId, "at 2099-02-01T00:00:00Z", "second"]]);
+    await assert.rejects(tasks.editSchedule(first.jobId!, { schedule: "in 1h", prompt: "x" }), { code: "not_found" }); // the old id is gone
+    await assert.rejects(tasks.runJob("prime.schedule", { schedule: "whenever", prompt: "x" }), { code: "invalid" }); // Prime rejects bad text
+    await tasks.cancelSchedule(edited.jobId!);
+    await tasks.heartbeatAction(beat.jobId!, "stop");
+    assert.deepEqual(await tasks.work(), { goal: null, heartbeat: null, schedules: [] });
   } finally {
     tasks?.close();
     client.close();

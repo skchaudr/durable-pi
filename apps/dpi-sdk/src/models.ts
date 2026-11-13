@@ -1,5 +1,6 @@
 // Client-side reducers. Each consumes stream frames and exposes plain state plus change
 // notifications, so Vue, the TUI or any other renderer can sit on top without knowing the wire.
+import type { PrimeWork } from "./prime.js";
 import type {
   AgentSummary,
   DeviceStatus,
@@ -291,6 +292,8 @@ export interface SessionViewState {
   tasks: TaskNode[];
   usage: UsageTotals;
   ready: boolean;
+  /** Prime only: goal, heartbeat and schedules, once the backend has sent them. */
+  primeWork?: PrimeWork;
 }
 
 export function agentLabel(agent: Pick<AgentSummary, "id" | "name">) {
@@ -306,6 +309,7 @@ export class SessionModel extends Emitter {
     } else if (frame.type === "agents") this.state = { ...this.state, agents: frame.agents };
     else if (frame.type === "tasks") this.state = { ...this.state, tasks: frame.tasks };
     else if (frame.type === "usage") this.state = { ...this.state, usage: frame.usage };
+    else if (frame.type === "prime_work") this.state = { ...this.state, primeWork: frame.work };
     else return false;
     this.emit();
     return true;

@@ -44,12 +44,14 @@ export function sessionStream(svc: Service, row: SessionRow, res: Response) {
     if (sse.closed) return;
     sse.send({ type: "session", agents: svc.agents(row), tasks: t, usage: svc.usage(row) });
     sse.sendIfChanged("tasks", { type: "tasks", tasks: t });
+    sse.sendIfChanged("prime_work", { type: "prime_work", work: tasks.workNow() }); // after liveTasks() read Prime
   });
   const push = coalesce(async () => {
     if (sse.closed || !svc.handles.has(row.id)) return;
     sse.sendIfChanged("agents", { type: "agents", agents: svc.agents(row) });
     sse.sendIfChanged("usage", { type: "usage", usage: svc.usage(row) });
     sse.sendIfChanged("tasks", { type: "tasks", tasks: await liveTasks() });
+    sse.sendIfChanged("prime_work", { type: "prime_work", work: tasks.workNow() });
   }, 250);
   const off = handle.subscribe(() => push());
   const offCatalog = svc.subscribe(() => push());

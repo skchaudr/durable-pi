@@ -12,12 +12,14 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
+  Target,
 } from "lucide-vue-next";
 import { THINKING_LEVELS, type ThinkingLevel } from "@sdk/api";
 import type { StateChange } from "@sdk/app-state";
 import StateEditor from "./StateEditor.vue";
 import TasksPanel from "./TasksPanel.vue";
 import ExtensionsPanel from "./ExtensionsPanel.vue";
+import PrimePanel from "./PrimePanel.vue";
 import ContextBar from "./ContextBar.vue";
 import { message } from "../client/hub";
 import { toolSignature } from "../client/signature";
@@ -53,15 +55,18 @@ const signatures = computed(
   () => new Map(detail.value?.tools.map((t) => [t.name, toolSignature(t.name, t.parameters)])),
 );
 
-const allTabs = [
+// Goal, heartbeat and schedules ship with Prime, so their panel is fixed to Prime devices.
+const prime = computed(() => device.value?.info?.durableVersion === "prime");
+const allTabs = computed(() => [
   { id: "session", label: "Session", icon: FolderOpen },
   { id: "state", label: "State", icon: Braces },
   { id: "tasks", label: "Tasks", icon: Activity },
+  ...(prime.value ? [{ id: "prime", label: "Prime work", icon: Target }] : []),
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "extensions", label: "Extend", icon: Puzzle },
-];
-// A Prime child serves neither App State, tools nor extensions.
-const tabs = computed(() => (primeChild.value ? allTabs.filter((t) => t.id === "session" || t.id === "tasks") : allTabs));
+]);
+// A Prime child serves neither App State, tools nor extensions; moving off a tab's device lands on Session.
+const tabs = computed(() => (primeChild.value ? allTabs.value.filter((t) => t.id === "session" || t.id === "tasks") : allTabs.value));
 watch(tabs, (t) => t.some((x) => x.id === ui.tab) || (ui.tab = "session"));
 const usageRows = computed(() => [
   { label: "Input", tokens: usage.value.input, cost: usage.value.inputCost },
@@ -362,6 +367,7 @@ const offeredTools = computed(() => detail.value?.tools.filter((t) => t.offered)
           />
         </template>
         <TasksPanel v-if="ui.tab === 'tasks'" />
+        <PrimePanel v-if="ui.tab === 'prime' && prime" />
         <ExtensionsPanel v-if="ui.tab === 'extensions'" />
         <template v-if="ui.tab === 'tools'"
           ><div class="panel-heading">

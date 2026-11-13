@@ -21,6 +21,7 @@ import type {
   WireEntry,
 } from "./api.js";
 import { DpiError } from "./errors.js";
+import type { PrimeGoalAction, PrimeGoalResult, PrimeHeartbeatAction, PrimeJob, PrimeWork } from "./prime.js";
 import { readSse } from "./sse.js";
 
 export interface RequestOptions {
@@ -191,6 +192,33 @@ export class SessionHandle {
   }
   inspect() {
     return this.client.request<unknown>("GET", `${this.base}/inspect`);
+  }
+  // Prime only: goal, heartbeat and schedules (prime-backend).
+  primeWork() {
+    return this.client.request<PrimeWork>("GET", `${this.base}/prime/work`);
+  }
+  /** Goals are `/goal` prompts: a busy agent queues the command (`queued: true`) instead of refusing it. */
+  setPrimeGoal(objective: string, tokenBudget = 0) {
+    return this.client.request<PrimeGoalResult>("PUT", `${this.base}/prime/goal`, { objective, tokenBudget });
+  }
+  primeGoal(action: PrimeGoalAction) {
+    return this.client.request<PrimeGoalResult>("POST", `${this.base}/prime/goal/${action}`, {});
+  }
+  setPrimeHeartbeat(body: { schedule: string; prompt: string; deliveryMode?: "steer" | "follow_up" }) {
+    return this.client.request<PrimeJob>("PUT", `${this.base}/prime/heartbeat`, body);
+  }
+  primeHeartbeat(jobId: string, action: PrimeHeartbeatAction) {
+    return this.client.request<{ status: string }>("POST", `${this.base}/prime/heartbeat/${enc(jobId)}/${action}`, {});
+  }
+  addPrimeSchedule(body: { schedule: string; prompt: string }) {
+    return this.client.request<PrimeJob>("POST", `${this.base}/prime/schedules`, body);
+  }
+  /** Prime has no edit: this cancels `jobId` and adds a new job, so `job.id` differs from `replaced`. */
+  editPrimeSchedule(jobId: string, body: { schedule: string; prompt: string }) {
+    return this.client.request<{ job: PrimeJob; replaced: string }>("PUT", `${this.base}/prime/schedules/${enc(jobId)}`, body);
+  }
+  cancelPrimeSchedule(jobId: string) {
+    return this.client.request<{ status: string }>("DELETE", `${this.base}/prime/schedules/${enc(jobId)}`);
   }
   compaction() {
     return this.client.request<CompactionSettings>("GET", `${this.base}/compaction`);

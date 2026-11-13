@@ -12,6 +12,7 @@ import type {
   WireAgentEvent,
   WireSnapshotEvent,
 } from "../../dpi-sdk/src/api.js";
+import type { PrimeGoalAction, PrimeGoalResult, PrimeHeartbeatAction, PrimeWork } from "../../dpi-sdk/src/prime.js";
 
 /** Child agents are numbered from here; the catalog hands out the ids below it (2, 3, ...) to created and forked agents. */
 export const CHILD_AGENT_BASE = 1000;
@@ -63,6 +64,16 @@ export interface TaskSource {
   terminalTasks(limit?: number): Promise<TaskOutcome[]>;
   abort(taskId: number): Promise<void>;
   onChange(listener: () => void): () => void;
+  // The Prime work panel: goal, heartbeat and schedules, set and managed from the page.
+  work(): Promise<PrimeWork>; // reads Prime, then answers
+  workNow(): PrimeWork; // as of the last read, for the session stream
+  /** Creates a schedule (`prime.schedule`), the heartbeat (`prime.heartbeat`, replacing it) or a goal (`prime.goal`, queued while busy). */
+  runJob(job: string, input?: Record<string, unknown>): Promise<{ taskId: number; jobId?: string; queued?: boolean }>;
+  goalCommand(action: PrimeGoalAction): Promise<PrimeGoalResult>;
+  heartbeatAction(jobId: string, action: PrimeHeartbeatAction): Promise<void>;
+  cancelSchedule(jobId: string): Promise<void>;
+  /** Cancel plus add: Prime has no edit, so the schedule's id changes. */
+  editSchedule(jobId: string, input: Record<string, unknown>): Promise<{ jobId: string; replaced: string }>;
 }
 
 export interface PrimeDriver {

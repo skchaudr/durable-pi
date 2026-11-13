@@ -218,6 +218,12 @@ class PrimeSession implements PrimeAgentHandle {
   tasks() {
     return (this.taskSource ??= new PrimeTasks(this.client, () => this.activeId, {
       idFile: this.idDir ? join(this.idDir, `task-ids-${this.primeSessionId}.json`) : undefined,
+      // /goal goes the way the composer's messages go, so a busy agent queues it.
+      send: async (message) => {
+        const queued = this.busy();
+        await this.send(message, "followUp");
+        return { queued };
+      },
     }));
   }
   closeTasks() {
