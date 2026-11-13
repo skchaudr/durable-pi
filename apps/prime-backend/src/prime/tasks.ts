@@ -5,6 +5,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import type { TaskNode, TaskOutcome } from "../../../dpi-sdk/src/api.js";
 import type { JobDef, JobInputValue, JobRun, JobRunsDoc } from "../../../dpi-sdk/src/jobs.js";
+import type { PrimeGoal, PrimeGoalAction, PrimeGoalResult, PrimeHeartbeatAction, PrimeJob, PrimeWork } from "../../../dpi-sdk/src/prime.js";
 import { ApiFault, invalid, notFound } from "../errors.js";
 import { PrimeError } from "./client.js";
 
@@ -22,6 +23,11 @@ export interface TasksOptions {
   idFile?: string;
   /** Poll interval while someone listens (default 5000): cron changes have no daemon event. */
   pollMs?: number;
+  /**
+   * How `/goal ...` reaches the session. The driver passes the composer's send path, so a busy agent queues the command
+   * instead of refusing it. Without it the command goes out as a plain `prompt`.
+   */
+  send?: (message: string) => Promise<PrimeGoalResult>;
 }
 
 export type TaskKind = "prime.schedule" | "prime.heartbeat" | "prime.goal";
@@ -44,6 +50,9 @@ const head = (s: string, n = 60) => {
   const t = s.replace(/\s+/g, " ").trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
+const isHeartbeat = (job: J) => job.source === "heartbeat" || job.source === "rlm_heartbeat";
+const isLive = (job: J) => job.status === "active" || job.status === "paused";
+const sleep = (n: number) => new Promise<void>((r) => setTimeout(r, n));
 const ms = (iso: unknown) => (typeof iso === "string" && Number.isFinite(Date.parse(iso)) ? Date.parse(iso) : 0);
 
 /** A cron_list job (AgentCronJob, crates/pa-core/src/cron/mod.rs). */
@@ -66,6 +75,35 @@ export function cronItem(job: J): Item {
     phase: job.status === "paused" ? "paused" : job.nextRunAt ? `next ${job.nextRunAt}` : "scheduled",
     outcome,
     at: ms(job.updatedAt),
+  };
+}
+
+/** A cron_list job as the Prime work panel shows it. */
+export function primeJob(job: J): PrimeJob {
+  return {
+    id: String(job.id),
+    status: job.status === "paused" ? "paused" : "active",
+    schedule: String(job.schedule?.expression ?? ""),
+    prompt: String(job.prompt ?? ""),
+    ...(job.nextRunAt ? { nextRunAt: String(job.nextRunAt) } : {}),
+    ...(job.lastRunAt ? { lastRunAt: String(job.lastRunAt) } : {}),
+    runCount: Number(job.runCount) || 0,
+    ...(job.deliveryMode ? { deliveryMode: job.deliveryMode } : {}),
+  };
+}
+
+/** The goal as the Prime work panel shows it (any status but idle); null when the session has none. */
+export function primeGoal(goal: J | null | undefined): PrimeGoal | null {
+  if (!goal?.objective || goal.status === "idle") return null;
+  const reason = goal.lastError ?? goal.lastReason;
+  return {
+    status: goal.status,
+    objective: String(goal.objective),
+    ...(Number(goal.tokenBudget) > 0 ? { tokenBudget: Number(goal.tokenBudget) } : {}),
+    tokensUsed: Number(goal.tokensUsed) || 0,
+    timeUsedSeconds: Number(goal.timeUsedSeconds) || 0,
+    continuationsUsed: Number(goal.continuationsUsed) || 0,
+    ...(reason ? { reason: String(reason) } : {}),
   };
 }
 
@@ -166,7 +204,9 @@ export class PrimeTasks {
   private next = 1;
   private ids: Record<string, number> = {};
   private items = new Map<number, Item>(); // as of the last refresh
-  private cleared = new Map<string, Item>(); // goals stopped through abort(): Prime forgets a cleared goal
+  private cleared = new Map<string, Item>(); // goals cleared through abort() or goalCommand("clear"): Prime forgets a cleared goal
+  private cron: J[] = []; // cron_list as of the last refresh
+  private goal: J | null | undefined; // get_connection_state.goal as of the last refresh, or the last goal_update
   private runs = new Map<number, JobRun>();
   private counts: Record<string, number> = {};
   private listeners = new Set<() => void>();
@@ -214,17 +254,35 @@ export class PrimeTasks {
   /** Reads Prime's state, rebuilds the task views and the run records, and notifies listeners if anything changed. */
   async refresh(): Promise<void> {
     const [cron, state] = await Promise.all([this.req({ type: "cron_list", includeInactive: true }), this.req({ type: "get_connection_state" })]);
-    const found = [...(cron?.jobs ?? []).map(cronItem), goalItem(state?.goal)].filter((i): i is Item => !!i);
+    this.cron = cron?.jobs ?? [];
+    this.goal = state?.goal;
+    const found = [...this.cron.map(cronItem), goalItem(this.goal)].filter((i): i is Item => !!i);
     for (const [key, it] of this.cleared) if (!found.some((f) => f.key === key)) found.push(it);
     this.items = new Map(found.map((it) => [this.idOf(it.key), it]));
     for (const [id, run] of this.runs) {
       const it = this.items.get(id);
       if (it) this.syncRun(run, it);
     }
-    const sig = JSON.stringify([...this.items].map(([id, it]) => [id, it.live, it.phase, it.outcome?.status]));
+    this.publish();
+  }
+
+  /** Notifies listeners if the tasks or the Prime work (usage, schedules, prompts) differ from what they last heard. */
+  private publish() {
+    const sig = JSON.stringify([[...this.items].map(([id, it]) => [id, it.live, it.phase, it.outcome?.status]), this.workNow()]);
     if (sig === this.sig) return;
     this.sig = sig;
     for (const l of this.listeners) l();
+  }
+
+  /** The goal, heartbeat and schedules as of the last refresh. */
+  workNow(): PrimeWork {
+    const live = this.cron.filter(isLive);
+    return { goal: primeGoal(this.goal), heartbeat: live.filter(isHeartbeat).map(primeJob)[0] ?? null, schedules: live.filter((j) => !isHeartbeat(j)).map(primeJob) };
+  }
+
+  async work(): Promise<PrimeWork> {
+    await this.refresh();
+    return this.workNow();
   }
 
   /** TaskNode per live schedule / heartbeat / goal. */
@@ -243,6 +301,12 @@ export class PrimeTasks {
       .map(([id, it]) => taskOutcome(id, it));
   }
 
+  private async command(message: string): Promise<PrimeGoalResult> {
+    if (this.opts.send) return this.opts.send(message);
+    await this.req({ type: "prompt", message });
+    return { queued: false };
+  }
+
   /** Cancels the schedule, stops the heartbeat, or clears the goal. */
   async abort(taskId: number): Promise<void> {
     if (!this.items.get(taskId)?.live) await this.refresh();
@@ -251,33 +315,93 @@ export class PrimeTasks {
     if (!it.live) throw new ApiFault("conflict", `Task ${taskId} already finished`);
     if (it.kind === "prime.schedule") await this.req({ type: "cron_cancel", jobId: it.ref });
     else if (it.kind === "prime.heartbeat") await this.req({ type: "heartbeat_manage", jobId: it.ref, action: "stop" });
-    else {
-      await this.req({ type: "prompt", message: "/goal clear" });
-      this.cleared.set(it.key, { ...it, live: false, at: Date.now(), outcome: { status: "aborted", result: { objective: it.label } } });
+    else await this.clearGoal(it);
+    await this.refresh();
+  }
+
+  private async clearGoal(it?: Item): Promise<PrimeGoalResult> {
+    const sent = await this.command("/goal clear");
+    if (it?.live) this.cleared.set(it.key, { ...it, live: false, at: Date.now(), outcome: { status: "aborted", result: { objective: it.label } } });
+    return sent;
+  }
+
+  /** `/goal pause|resume|clear`. A busy agent queues it (`queued: true`); the goal changes when the command runs. */
+  async goalCommand(action: PrimeGoalAction): Promise<PrimeGoalResult> {
+    if (!["pause", "resume", "clear"].includes(action)) throw invalid("action must be pause, resume or clear");
+    await this.refresh();
+    if (action === "clear") return this.clearGoal([...this.items.values()].find((i) => i.kind === "prime.goal"));
+    if (!this.goal?.objective || this.goal.status === "idle") throw new ApiFault("conflict", "This session has no goal");
+    return this.command(`/goal ${action}`);
+  }
+
+  private async liveJob(jobId: string, heartbeat: boolean): Promise<J> {
+    await this.refresh();
+    const job = this.cron.find((j) => String(j.id) === jobId && isLive(j) && isHeartbeat(j) === heartbeat);
+    if (!job) throw notFound(`No live ${heartbeat ? "heartbeat" : "schedule"} ${jobId}`);
+    return job;
+  }
+
+  async heartbeatAction(jobId: string, action: PrimeHeartbeatAction): Promise<void> {
+    if (!["pause", "resume", "stop"].includes(action)) throw invalid("action must be pause, resume or stop");
+    await this.liveJob(jobId, true);
+    await this.req({ type: "heartbeat_manage", jobId, action });
+    await this.refresh();
+  }
+
+  async cancelSchedule(jobId: string): Promise<void> {
+    await this.liveJob(jobId, false);
+    await this.req({ type: "cron_cancel", jobId });
+    await this.refresh();
+  }
+
+  /** Prime has no edit command: adds the new schedule first (a bad one leaves the old untouched), then cancels the old. The id changes. */
+  async editSchedule(jobId: string, input: Record<string, unknown>): Promise<{ jobId: string; replaced: string }> {
+    await this.liveJob(jobId, false);
+    const added = (await this.runJob("prime.schedule", input)).jobId!;
+    try {
+      await this.req({ type: "cron_cancel", jobId });
+    } catch (e) {
+      throw new ApiFault("internal", `Added schedule ${added}, but cancelling ${jobId} failed: ${e instanceof Error ? e.message : e}`);
     }
     await this.refresh();
+    return { jobId: added, replaced: jobId };
   }
 
   jobDefs(): JobDef[] {
     return JOB_DEFS;
   }
 
-  /** Creates the schedule / heartbeat / goal on the session and returns its task id. Missing inputs take the JobDef defaults. */
-  async runJob(job: string, input: Record<string, unknown> = {}): Promise<{ taskId: number }> {
+  /**
+   * Creates the schedule / heartbeat / goal on the session and returns its task id (and, for a schedule or heartbeat,
+   * Prime's job id). Missing inputs take the JobDef defaults. A heartbeat also takes `deliveryMode` ("steer" | "follow_up").
+   * A goal started while the agent is busy waits behind the turn: `{ taskId: 0, queued: true }`, there is no task yet.
+   */
+  async runJob(job: string, input: Record<string, unknown> = {}): Promise<{ taskId: number; jobId?: string; queued?: boolean }> {
     const def = JOB_DEFS.find((d) => d.id === job);
     if (!def) throw notFound(`No Prime job "${job}"`);
     const v = coerce(def, input);
     let key: string;
+    let jobId: string | undefined;
     if (job === "prime.schedule") {
-      key = `cron:${(await this.req({ type: "cron_add", schedule: v.schedule, prompt: v.prompt })).job.id}`;
+      jobId = String((await this.req({ type: "cron_add", schedule: v.schedule, prompt: v.prompt })).job.id);
+      key = `cron:${jobId}`;
     } else if (job === "prime.heartbeat") {
-      key = `cron:${(await this.req({ type: "heartbeat_set", schedule: v.schedule, prompt: v.prompt })).heartbeat.id}`;
+      const mode = typeof input.deliveryMode === "string" && input.deliveryMode ? { deliveryMode: input.deliveryMode } : {};
+      jobId = String((await this.req({ type: "heartbeat_set", schedule: v.schedule, prompt: v.prompt, ...mode })).heartbeat.id);
+      key = `cron:${jobId}`;
     } else {
       const budget = Number(v.tokenBudget);
-      await this.req({ type: "prompt", message: `/goal ${budget > 0 ? `--budget ${budget} ` : ""}${v.objective}` });
-      await this.refresh();
-      const live = [...this.items.values()].find((i) => i.kind === "prime.goal" && i.live);
-      if (!live) throw new ApiFault("internal", "Prime did not start the goal");
+      const sent = await this.command(`/goal ${budget > 0 ? `--budget ${budget} ` : ""}${v.objective}`);
+      if (sent.queued) return { taskId: 0, queued: true };
+      // The worker runs the command after it accepts the prompt: wait for the goal to show (Prime may normalise the objective).
+      let live: Item | undefined;
+      for (let i = 0; i < 25 && !live; i++) {
+        if (i) await sleep(200);
+        await this.refresh();
+        const goals = [...this.items.values()].filter((it) => it.kind === "prime.goal" && it.live);
+        live = this.goal?.objective === v.objective ? goals[0] : i === 24 ? goals[0] : undefined;
+      }
+      if (!live) throw new ApiFault("internal", "Prime did not start the goal; its reply is in the chat");
       key = live.key;
     }
     if (job !== "prime.goal") await this.refresh();
@@ -302,7 +426,7 @@ export class PrimeTasks {
     };
     if (it) this.syncRun(run, it);
     this.runs.set(taskId, run);
-    return { taskId };
+    return { taskId, ...(jobId ? { jobId } : {}) };
   }
 
   private syncRun(run: JobRun, it: Item) {
@@ -332,7 +456,13 @@ export class PrimeTasks {
     if (!this.stop) {
       const poke = () => void this.refresh().catch(() => {}); // a failed read keeps the last good view
       const onFrame = (f: J) => f?.type === "heartbeats_changed" && poke();
-      const onEvent = (f: J) => f?.activeSessionId === this.sid && f.event?.type === "goal_update" && poke();
+      const onEvent = (f: J) => {
+        if (f?.activeSessionId !== this.sid || f.event?.type !== "goal_update") return;
+        const before = this.goal;
+        this.goal = f.event.goal; // the event carries the whole GoalState, so a usage tick needs no daemon read
+        if (before?.status !== this.goal?.status || before?.goalId !== this.goal?.goalId) poke();
+        else this.publish();
+      };
       this.client.on("frame", onFrame);
       this.client.on("session_event", onEvent);
       this.timer = setInterval(poke, this.opts.pollMs ?? 5000);

@@ -1,0 +1,66 @@
+/* The Prime work tab: goal, heartbeat and schedule cards. Cards reuse .ext-card. */
+
+.prime-card .ext-head strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.prime-text {
+  margin: 8px 0 0;
+  font-size: 16px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.prime-meta {
+  margin: 6px 0 0;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--secondary);
+  overflow-wrap: anywhere;
+}
+.prime-meta code,
+.prime-job-head code {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 16px;
+}
+.prime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.prime-form {
+  display: grid;
+  gap: 4px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #3c2b2d;
+}
+.prime-form .field-label {
+  margin: 8px 0 2px;
+}
+.prime-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.prime-list li {
+  padding: 10px 12px;
+  border: 1px solid #3c2b2d;
+  border-radius: 6px;
+}
+.prime-job-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+.prime-job-head small {
+  margin-left: auto;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 14px;
+  color: var(--secondary);
+}

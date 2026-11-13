@@ -6,6 +6,7 @@
 // fails the build if pi-durable's own types stop fitting them.
 
 import type { JobDef } from "./jobs.js";
+import type { PrimeWork } from "./prime.js";
 
 export const API_VERSION = 1 as const;
 
@@ -567,6 +568,8 @@ export type Frame =
   | { type: "agents"; agents: AgentSummary[] }
   | { type: "tasks"; tasks: TaskNode[] }
   | { type: "usage"; usage: UsageTotals }
+  /** Prime only: the session's goal, heartbeat and schedules, whenever any of them changes. */
+  | { type: "prime_work"; work: PrimeWork }
   // agent scope
   | { type: "snapshot"; snapshot: WireSnapshotEvent; inbox: InboxItem[] }
   | { type: "batch"; events: readonly WireAgentEvent[] }

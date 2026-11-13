@@ -7,6 +7,7 @@ import { DEVICE_DOC_KINDS, type Service } from "./service.js";
 import { agentStream, deviceStream, sessionStream } from "./streams.js";
 import { idempotent } from "./idempotency.js";
 import { invalid } from "./errors.js";
+import { primeWorkRoutes } from "./prime-work-routes.js";
 
 type Async = (req: Request, res: Response) => Promise<unknown>;
 const route = (fn: Async) => (req: Request, res: Response, next: NextFunction) => fn(req, res).catch(next);
@@ -135,6 +136,8 @@ export function v1(svc: Service) {
   r.post(`${a}/reset`, route(async (req, res) => res.json(await svc.reset(L(res).row, req.body?.note))));
   r.get(`${a}/docs/:kind`, unsupported);
   r.all(`${a}/demo/{*rest}`, unsupported);
+
+  primeWorkRoutes(r, svc);
 
   return r;
 }

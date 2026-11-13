@@ -13,7 +13,8 @@ import type {
   WireSnapshotEvent,
   WireUsage,
 } from "../../dpi-sdk/src/api.js";
-import type { PrimeAgentHandle, PrimeChild, PrimeDriver } from "./driver.js";
+import type { PrimeGoal, PrimeGoalAction, PrimeGoalResult, PrimeHeartbeatAction, PrimeJob, PrimeWork } from "../../dpi-sdk/src/prime.js";
+import type { PrimeAgentHandle, PrimeChild, PrimeDriver, TaskSource } from "./driver.js";
 import { ApiFault, invalid } from "./errors.js";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -101,8 +102,9 @@ export class FakeAgent implements PrimeAgentHandle {
     if (!entries) throw invalid(`Prime has no live session for child ${id}`);
     return { ...this.snapshot(), entries };
   }
+  private taskSource?: FakeTasks;
   tasks() {
-    return { liveTasks: async () => [], terminalTasks: async () => [], abort: async () => { throw invalid("No task"); }, onChange: () => () => {} };
+    return (this.taskSource ??= new FakeTasks(this));
   }
   async compaction(): Promise<CompactionSettings> {
     return { enabled: this.autoCompaction, reserveTokens: 16384, backgroundTokens: 0, keepRecentTokens: 20000 };
@@ -204,6 +206,136 @@ export class FakeAgent implements PrimeAgentHandle {
       { type: "run_end", inputs: [submission] },
       { type: "usage_changed", usage: { models: { "fake/echo": usage() }, tools: {} } },
     ]);
+  }
+}
+
+const SCHEDULE_TEXT = /^(in \d+\s*[a-z]+|every \d+\s*[a-z]+|at \S+|\S+( \S+){4})$/i; // not Prime's parser, only enough to reject junk
+
+/**
+ * Prime's goal, heartbeat and schedules, in memory. `/goal` commands go through the agent's `send` (so tests see them in
+ * `agent.sends`); sent while the agent is busy they wait and apply when its run ends, like Prime's queue.
+ */
+export class FakeTasks implements TaskSource {
+  private goal: PrimeGoal | null = null;
+  private jobs: (PrimeJob & { heartbeat: boolean })[] = [];
+  private listeners = new Set<() => void>();
+  private queued: string[] = [];
+  private seq = 0;
+
+  constructor(private readonly agent: FakeAgent) {
+    agent.subscribe((events) => {
+      if (!events.some((e) => e.type === "run_end") || agent.busy()) return;
+      const waiting = this.queued.splice(0);
+      for (const c of waiting) this.apply(c);
+      if (waiting.length) this.changed();
+    });
+  }
+
+  private changed() {
+    for (const fn of [...this.listeners]) fn();
+  }
+
+  private apply(command: string) {
+    const arg = command.replace(/^\/goal\s*/, "").trim();
+    const g = this.goal;
+    if (arg === "clear" || arg === "stop") this.goal = null;
+    else if (arg === "pause" && g) this.goal = { ...g, status: "paused" };
+    else if (arg === "resume" && g) this.goal = { ...g, status: "active" };
+    else if (arg && arg !== "status") {
+      const m = /^--budget (\d+) (.+)$/.exec(arg);
+      this.goal = { status: "active", objective: m ? m[2] : arg, ...(m ? { tokenBudget: Number(m[1]) } : {}), tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 };
+    }
+  }
+
+  /** Test hook: what a `goal_update` from Prime would do. */
+  setGoalState(patch: Partial<PrimeGoal> | null) {
+    this.goal = patch && ({ ...this.goal, ...patch } as PrimeGoal);
+    this.changed();
+  }
+
+  async liveTasks() {
+    return [];
+  }
+  async terminalTasks() {
+    return [];
+  }
+  async abort(): Promise<void> {
+    throw invalid("No task");
+  }
+  onChange(fn: () => void) {
+    this.listeners.add(fn);
+    return () => void this.listeners.delete(fn);
+  }
+
+  workNow(): PrimeWork {
+    const strip = ({ heartbeat: _h, ...job }: PrimeJob & { heartbeat: boolean }): PrimeJob => job;
+    return { goal: this.goal && { ...this.goal }, heartbeat: this.jobs.filter((j) => j.heartbeat).map(strip)[0] ?? null, schedules: this.jobs.filter((j) => !j.heartbeat).map(strip) };
+  }
+  async work() {
+    return this.workNow();
+  }
+
+  private async command(message: string): Promise<PrimeGoalResult> {
+    const queued = this.agent.busy();
+    await this.agent.send(message, "followUp");
+    if (queued) this.queued.push(message);
+    else this.apply(message);
+    this.changed();
+    return { queued };
+  }
+
+  private add(heartbeat: boolean, input: Record<string, unknown>) {
+    const schedule = String(input.schedule ?? (heartbeat ? "every 1h" : "")).trim();
+    const prompt = String(input.prompt ?? "").trim();
+    if (!SCHEDULE_TEXT.test(schedule)) throw invalid(`Invalid schedule "${schedule}"`);
+    if (!prompt) throw invalid("prompt is required");
+    if (input.deliveryMode !== undefined && input.deliveryMode !== "steer" && input.deliveryMode !== "follow_up") throw invalid('Heartbeat delivery mode must be "steer" or "follow_up"');
+    if (heartbeat) this.jobs = this.jobs.filter((j) => !j.heartbeat); // a heartbeat replaces the previous one
+    const job = { id: `fake-job-${++this.seq}`, status: "active" as const, schedule, prompt, runCount: 0, heartbeat, ...(heartbeat && input.deliveryMode ? { deliveryMode: input.deliveryMode as "steer" | "follow_up" } : {}) };
+    this.jobs.push(job);
+    return job;
+  }
+  private live(jobId: string, heartbeat: boolean) {
+    const job = this.jobs.find((j) => j.id === jobId && j.heartbeat === heartbeat);
+    if (!job) throw new ApiFault("not_found", `No live ${heartbeat ? "heartbeat" : "schedule"} ${jobId}`);
+    return job;
+  }
+
+  async runJob(job: string, input: Record<string, unknown> = {}) {
+    if (job === "prime.goal") {
+      const objective = String(input.objective ?? "").trim();
+      if (!objective) throw invalid("objective is required");
+      const budget = Number(input.tokenBudget ?? 0);
+      if (!Number.isInteger(budget) || budget < 0) throw invalid("tokenBudget must be an integer");
+      const { queued } = await this.command(`/goal ${budget > 0 ? `--budget ${budget} ` : ""}${objective}`);
+      return { taskId: queued ? 0 : 1, ...(queued ? { queued } : {}) };
+    }
+    if (job !== "prime.schedule" && job !== "prime.heartbeat") throw new ApiFault("not_found", `No Prime job "${job}"`);
+    const made = this.add(job === "prime.heartbeat", input);
+    this.changed();
+    return { taskId: ++this.seq, jobId: made.id };
+  }
+  async goalCommand(action: PrimeGoalAction) {
+    if (!["pause", "resume", "clear"].includes(action)) throw invalid("action must be pause, resume or clear");
+    if (action !== "clear" && !this.goal) throw new ApiFault("conflict", "This session has no goal");
+    return this.command(`/goal ${action}`);
+  }
+  async heartbeatAction(jobId: string, action: PrimeHeartbeatAction) {
+    const job = this.live(jobId, true);
+    if (action === "stop") this.jobs = this.jobs.filter((j) => j !== job);
+    else job.status = action === "pause" ? "paused" : "active";
+    this.changed();
+  }
+  async cancelSchedule(jobId: string) {
+    this.jobs = this.jobs.filter((j) => j !== this.live(jobId, false));
+    this.changed();
+  }
+  async editSchedule(jobId: string, input: Record<string, unknown>) {
+    const old = this.live(jobId, false);
+    const made = this.add(false, input);
+    this.jobs = this.jobs.filter((j) => j !== old);
+    this.changed();
+    return { jobId: made.id, replaced: jobId };
   }
 }
 

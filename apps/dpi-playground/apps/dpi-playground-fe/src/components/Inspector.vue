@@ -12,12 +12,14 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
+  Target,
 } from "lucide-vue-next";
 import { THINKING_LEVELS, type ThinkingLevel } from "@sdk/api";
 import type { StateChange } from "@sdk/app-state";
 import StateEditor from "./StateEditor.vue";
 import TasksPanel from "./TasksPanel.vue";
 import ExtensionsPanel from "./ExtensionsPanel.vue";
+import PrimePanel from "./PrimePanel.vue";
 import ContextBar from "./ContextBar.vue";
 import { message } from "../client/hub";
 import { toolSignature } from "../client/signature";
@@ -52,13 +54,18 @@ const signatures = computed(
   () => new Map(detail.value?.tools.map((t) => [t.name, toolSignature(t.name, t.parameters)])),
 );
 
-const tabs = [
+// Goal, heartbeat and schedules ship with Prime, so their panel is fixed to Prime devices.
+const prime = computed(() => device.value?.info?.durableVersion === "prime");
+const tabs = computed(() => [
   { id: "session", label: "Session", icon: FolderOpen },
   { id: "state", label: "State", icon: Braces },
   { id: "tasks", label: "Tasks", icon: Activity },
+  ...(prime.value ? [{ id: "prime", label: "Prime work", icon: Target }] : []),
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "extensions", label: "Extend", icon: Puzzle },
-];
+]);
+// Moving to a device without that tab leaves the panel on nothing.
+watch(prime, (on) => !on && ui.tab === "prime" && (ui.tab = "session"));
 const usageRows = computed(() => [
   { label: "Input", tokens: usage.value.input, cost: usage.value.inputCost },
   { label: "Output", tokens: usage.value.output, cost: usage.value.outputCost },
@@ -354,6 +361,7 @@ const offeredTools = computed(() => detail.value?.tools.filter((t) => t.offered)
           />
         </template>
         <TasksPanel v-if="ui.tab === 'tasks'" />
+        <PrimePanel v-if="ui.tab === 'prime' && prime" />
         <ExtensionsPanel v-if="ui.tab === 'extensions'" />
         <template v-if="ui.tab === 'tools'"
           ><div class="panel-heading">
