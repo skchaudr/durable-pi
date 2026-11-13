@@ -37,7 +37,9 @@ const compactionEntry = (id: number, head: number, summary: unknown, timestamp?:
 
 /** Prime's hidden notice after a compaction (pa-core ipython_state.rs `notice_content`): one card, not a bare pi.custom. */
 const PYTHON_STATE_KIND = "prime.python_state";
-const names = (list: string | undefined) => (list ?? "").split(",").map((n) => n.trim()).filter(Boolean);
+/** Python skills Prime injects into every kernel (the import names of its skills/ dir). The notice lists them beside the user's variables; the card shows only the user's. */
+export const PRIME_PYTHON_BUILTINS = new Set(["agent_message", "agent_observe", "attach_image", "compact", "edit", "goal", "refine", "rlm_heartbeat", "websearch"]);
+const names = (list: string | undefined) => (list ?? "").split(",").map((n) => n.trim()).filter((n) => n && !PRIME_PYTHON_BUILTINS.has(n));
 /** Names the notice lists. `defined` is absent when the kernel listing failed (the notice then has no names sentence). Python names hold no ".", so the sentence ends at the first one. */
 export function parsePythonState(text: string): { defined?: string[]; pruned: string[] } {
   const defined = /These names are still defined: ([^.]*)\./.exec(text)?.[1];
@@ -49,8 +51,18 @@ export function parsePythonState(text: string): { defined?: string[]; pruned: st
 }
 const contentText = (c: unknown): string => (typeof c === "string" ? c : Array.isArray(c) ? c.map((b: J) => (b?.type === "text" ? (b.text ?? "") : "")).join("") : "");
 
-/** A Prime message as a dpi entry: the python-state notice becomes its own kind, everything else keeps its role's pi.* kind. */
+/** Another agent's message to this one (pa-core agent_messaging.rs row). Its own kind, not pi.user: the dpi branch-point mapping counts those. */
+const AGENT_MESSAGE_KIND = "prime.agent_message";
+/** `details.fromRelationship` is the sender's relationship to this agent: a "parent" is the session the page calls Main. */
+function agentMessageText(m: J): string {
+  const d = m.details ?? {};
+  const from = d.fromRelationship === "parent" ? "Main" : String(d.from?.sessionName || "another agent");
+  return `From ${from}: ${typeof d.message === "string" ? d.message : contentText(m.content)}`;
+}
+
+/** A Prime message as a dpi entry: the python-state notice and agent messages become their own kinds, everything else keeps its role's pi.* kind. */
 function messageEntry(id: number, m: J): WireEntry {
+  if (m?.role === "custom" && m.customType === "agent_message") return { id, conversationId: 1, kind: AGENT_MESSAGE_KIND, data: { text: agentMessageText(m) } };
   if (m?.role === "custom" && m.customType === "ipython_state") {
     const parsed = parsePythonState(contentText(m.content));
     const n = parsed.defined?.length;

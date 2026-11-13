@@ -387,6 +387,56 @@ test("Prime child agent controls: message, cancel, thinking level, live transcri
   }
 });
 
+test("a child on a follow-up is busy from its own run, and Cancel reaches it even though Prime lists it as done", async () => {
+  const b = await boot();
+  try {
+    const s = await newSession(b);
+    const main = b.driver.agent([...b.driver.agents.keys()][0]);
+    main.kids = [{ agentId: 1000, id: "child-1", name: "worker-a", status: "done" }];
+    main.childEntries.set("child-1", []);
+    const kid = `/v1/sessions/${s.id}/agents/1000`;
+    const busy = async () => (await b.call("GET", `/v1/sessions/${s.id}/agents`)).body.find((a: { id: number }) => a.id === 1000).busy;
+    const tree = b.tail("/v1/events");
+    assert.equal(await busy(), false);
+
+    // the follow-up attaches the child; its run_start (roster still "done") flips busy and reaches the hub as a tree change
+    await b.call("POST", `${kid}/messages`, { content: "now the tests", requestId: "f1" });
+    const child = main.childHandles.get("child-1")!;
+    child.emit([{ type: "run_start", inputs: [1] }]);
+    await tree.waitFor((f) => f.type === "tree" && f.tree.sessions[0].agents.some((a) => a.id === 1000 && a.busy), "child busy on its follow-up");
+    assert.equal(await busy(), true);
+    assert.equal((await b.call("GET", `/v1/sessions/${s.id}`)).body.busy, true);
+
+    // Prime refuses cancel_rlm_child for a settled child: its own session is aborted instead
+    assert.deepEqual((await b.call("POST", `${kid}/abort`, {})).body, { ok: true });
+    assert.deepEqual(main.cancelled, []);
+    assert.equal(child.aborts, 1);
+    await tree.waitFor((f) => f.type === "tree" && f.tree.sessions[0].agents.some((a) => a.id === 1000 && !a.busy), "child idle after the abort");
+    assert.equal(await busy(), false);
+    tree.stop();
+  } finally {
+    await b.stop();
+    await b.cleanup();
+  }
+});
+
+test("a compaction or auto-compaction change reaches the tree, so the hub's copy is not stale", async () => {
+  const b = await boot();
+  try {
+    const s = await newSession(b);
+    const tree = b.tail("/v1/events");
+    await tree.waitFor((f) => f.type === "tree", "first tree");
+    const before = tree.frames.length;
+    assert.equal((await b.call("PATCH", `/v1/sessions/${s.id}/compaction`, { enabled: false })).status, 200);
+    const next = await tree.waitFor((f, i) => i >= before && f.type === "tree", "tree after the toggle");
+    assert.equal((next as Extract<Frame, { type: "tree" }>).tree.sessions[0].compaction?.enabled, false);
+    tree.stop();
+  } finally {
+    await b.stop();
+    await b.cleanup();
+  }
+});
+
 test("retry-worker on the main agent calls the driver; a failure is the Prime error", async () => {
   const b = await boot();
   try {
