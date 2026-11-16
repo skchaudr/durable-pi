@@ -11,6 +11,7 @@ import { DeviceMonitor } from "./monitor.js";
 import { StreamMux } from "./mux.js";
 import { proxy } from "./proxy.js";
 import { guard } from "./guard.js";
+import { opsProxy } from "./ops.js";
 import { seedFromConfig } from "./seed.js";
 
 const args = process.argv.slice(2);
@@ -23,6 +24,7 @@ const option = (key: string, fallback: string) => {
 const appDir = fileURLToPath(new URL("../../../", import.meta.url));
 const port = Number(option("--port", process.env.DPI_HUB_PORT ?? "4781"));
 const host = option("--host", process.env.DPI_HUB_HOST ?? "127.0.0.1");
+const opsUrl = option("--ops-url", process.env.DPI_OPS_URL ?? "http://127.0.0.1:4790");
 
 const registry = new NetworkRegistry();
 const configFile = seedFromConfig(registry, appDir);
@@ -90,6 +92,7 @@ app.put(
   safe((req, res) => res.json(mux.subscribe(String(req.params.streamId), req.body?.subs))),
 );
 app.all("/api/devices/:id/v1/{*rest}", proxy(registry, monitor));
+app.all("/api/ops/{*rest}", opsProxy(opsUrl));
 app.use("/api", (_req, res) => res.status(404).json(err("not_found", "API route not found")));
 
 const server = createServer(app);

@@ -12,6 +12,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
+  Siren,
   Target,
 } from "lucide-vue-next";
 import { THINKING_LEVELS, type ThinkingLevel } from "@sdk/api";
@@ -20,6 +21,7 @@ import StateEditor from "./StateEditor.vue";
 import TasksPanel from "./TasksPanel.vue";
 import ExtensionsPanel from "./ExtensionsPanel.vue";
 import PrimePanel from "./PrimePanel.vue";
+import IncidentsPanel from "./IncidentsPanel.vue";
 import ContextBar from "./ContextBar.vue";
 import { message } from "../client/hub";
 import { toolSignature } from "../client/signature";
@@ -64,6 +66,7 @@ const allTabs = computed(() => [
   ...(prime.value ? [{ id: "prime", label: "Prime work", icon: Target }] : []),
   { id: "tools", label: "Tools", icon: Wrench },
   { id: "extensions", label: "Extend", icon: Puzzle },
+  { id: "incidents", label: "Incidents", icon: Siren },
 ]);
 // A Prime child serves neither App State, tools nor extensions; moving off a tab's device lands on Session.
 const tabs = computed(() => (primeChild.value ? allTabs.value.filter((t) => t.id === "session" || t.id === "tasks") : allTabs.value));
@@ -369,6 +372,7 @@ const offeredTools = computed(() => detail.value?.tools.filter((t) => t.offered)
         <TasksPanel v-if="ui.tab === 'tasks'" />
         <PrimePanel v-if="ui.tab === 'prime' && prime" />
         <ExtensionsPanel v-if="ui.tab === 'extensions'" />
+        <IncidentsPanel v-if="ui.tab === 'incidents'" />
         <template v-if="ui.tab === 'tools'"
           ><div class="panel-heading">
             <h2>Tools</h2>

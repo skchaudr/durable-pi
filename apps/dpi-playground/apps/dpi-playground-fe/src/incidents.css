@@ -1,0 +1,216 @@
+/* Inspector "Incidents" tab: incident cards with a status bar, the report, the branch diff and the deploy approval. */
+.incident-card {
+  margin: 0 0 12px;
+  padding: 4px 14px 12px;
+  border: 1px solid #6b3a41;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #3a1d22aa, #24161800);
+}
+.incident-card.ready_for_review,
+.incident-card.deployed {
+  border-color: #3f6f55;
+  background: linear-gradient(180deg, #1c3a2b99, #16201b00);
+}
+.incident-top {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+  padding: 10px 0 8px;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-align: left;
+}
+.incident-top > svg:first-child {
+  color: #ff6b7d;
+  flex: none;
+}
+.ready_for_review .incident-top > svg:first-child,
+.deployed .incident-top > svg:first-child {
+  color: #6fcf97;
+}
+.incident-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.incident-top .flipped {
+  transform: rotate(180deg);
+}
+.incident-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: #4a2028;
+  color: #ffd0d6;
+  font-size: 14px;
+  white-space: nowrap;
+}
+.incident-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ff6b7d;
+}
+.ready_for_review .incident-status,
+.deployed .incident-status {
+  background: #1f4733;
+  color: #c9f5da;
+}
+.ready_for_review .incident-status i,
+.deployed .incident-status i {
+  background: #6fcf97;
+}
+.blocked .incident-status {
+  background: #4a3517;
+  color: #ffe1b3;
+}
+.incident-steps {
+  display: flex;
+  gap: 6px;
+  margin: 2px 0 10px;
+  padding: 0;
+  list-style: none;
+}
+.incident-steps li {
+  flex: 1;
+}
+.incident-steps li i {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: #3b2c2e;
+}
+.incident-steps li.done i,
+.incident-steps li.current i {
+  background: var(--accent);
+}
+.ready_for_review .incident-steps li.done i,
+.deployed .incident-steps li.done i {
+  background: #6fcf97;
+}
+.incident-summary {
+  margin: 0;
+  line-height: 1.55;
+}
+.incident-remote {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.incident-body {
+  margin-top: 12px;
+}
+.incident-facts,
+.incident-report {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+.incident-facts > div,
+.incident-report > div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 10px;
+}
+.incident-facts dt,
+.incident-report dt {
+  color: var(--secondary);
+}
+.incident-facts dd,
+.incident-report dd {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.incident-report {
+  padding-top: 12px;
+  border-top: 1px solid #ffffff14;
+}
+.incident-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.review-log,
+.diff,
+.deploy-card pre {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #120d0e;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.review-log {
+  color: #c9f5da;
+}
+.diff {
+  max-height: 360px;
+}
+.diff span {
+  display: block;
+  white-space: pre;
+}
+.diff .add {
+  color: #8fe0ad;
+}
+.diff .del {
+  color: #ff9aa6;
+}
+.diff .hunk {
+  color: #8ab4f8;
+}
+.diff .file {
+  color: var(--secondary);
+}
+.deploy-card {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid #f2b25c;
+  border-radius: 10px;
+  background: #3a2a1755;
+}
+.deploy-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.deploy-head svg {
+  color: #f2b25c;
+}
+.deploy-card p {
+  margin: 8px 0 6px;
+  line-height: 1.5;
+}
+.deploy-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--secondary);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 14px;
+}
+.deploy-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 10px;
+}
+.deploy-rolling {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 0;
+  color: #6fcf97;
+}

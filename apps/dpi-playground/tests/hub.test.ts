@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { once } from "node:events";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -253,6 +254,87 @@ test("hub: registry from YAML, monitoring, token-injecting proxy, guard, mux, of
     await hub.stop();
     await a.stop();
     await b.stop();
+    await t.cleanup();
+  }
+});
+
+test("hub: /api/ops forwards only to the configured ops service, streams its SSE, is guarded, 503 when down", async () => {
+  const t = await tempStore();
+  const seen: { method?: string; url?: string; host?: string; body: string }[] = [];
+  const ops: Server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen.push({ method: req.method, url: req.url, host: req.headers.host, body });
+      if (req.url === "/api/stream") {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write('event: init\ndata: {"incidents":[{"id":"INC-1"}],"deploys":[]}\n\n');
+        setTimeout(() => res.write('event: deploy\ndata: {"id":7}\n\n'), 100);
+      } else if (req.method === "POST") res.setHeader("content-type", "application/json").end(body);
+      else res.setHeader("content-type", "application/json").end('[{"id":"INC-1"}]');
+    });
+  });
+  ops.listen(0, "127.0.0.1");
+  await once(ops, "listening");
+  const opsPort = (ops.address() as { port: number }).port;
+  const networkFile = join(t.root, "dpi-network.yaml");
+  writeFileSync(networkFile, "devices: {}\n");
+  const hub = await bootHub(join(t.root, "hub"), networkFile, { DPI_OPS_URL: `http://127.0.0.1:${opsPort}` });
+  const get = (path: string, headers: Record<string, string> = {}) =>
+    new Promise<number>((done) => {
+      const u = new URL(hub.base + path);
+      httpRequest({ host: u.hostname, port: u.port, path: u.pathname, headers }, (r) => (r.resume(), done(r.statusCode ?? 0))).end();
+    });
+  try {
+    // Forwarded to OPS_URL with the ops service's own Host; the body of a decide survives.
+    assert.deepEqual(await (await fetch(`${hub.base}/api/ops/api/incidents`)).json(), [{ id: "INC-1" }]);
+    const decided = await fetch(`${hub.base}/api/ops/api/deploys/3/decide`, json({ approved: true }));
+    assert.deepEqual(await decided.json(), { approved: true });
+    assert.equal(seen[0].host, `127.0.0.1:${opsPort}`);
+    assert.equal(seen[1].url, "/api/deploys/3/decide");
+
+    // Only the Incidents tab's routes, and never a client-supplied target.
+    const before = seen.length;
+    for (const path of [
+      "/api/ops/api/conversations/1/send",
+      "/api/ops/http://evil.test/api/incidents",
+      "/api/ops//evil.test/api/incidents",
+      "/api/ops/api/incidents/../conversations",
+      "/api/ops/api/incidents/x/review?url=http://evil.test",
+    ])
+      assert.equal((await fetch(hub.base + path)).status, 404, path);
+    assert.equal((await fetch(`${hub.base}/api/ops/api/deploys/3/decide`, { method: "GET" })).status, 404);
+    assert.equal(seen.length, before, "nothing reached the ops service");
+
+    // SSE passes through frame by frame.
+    const stop = new AbortController();
+    const res = await fetch(`${hub.base}/api/ops/api/stream`, { signal: stop.signal });
+    const events: string[] = [];
+    for await (const m of readSse(res.body!)) {
+      events.push(m.event);
+      if (events.length === 2) break;
+    }
+    stop.abort();
+    assert.deepEqual(events, ["init", "deploy"]);
+
+    // The guard still applies.
+    assert.equal(await get("/api/ops/api/incidents", { host: "evil.test" }), 421);
+    assert.equal(await get("/api/ops/api/incidents", { origin: "http://evil.test" }), 403);
+    assert.equal(
+      (await fetch(`${hub.base}/api/ops/api/deploys/3/decide`, { method: "POST", body: "approved=1" })).status,
+      415,
+    );
+    assert.equal(seen.length, before + 1, "only the stream request got through");
+
+    // Down → 503, for REST and the stream.
+    ops.closeAllConnections();
+    ops.close();
+    await once(ops, "close");
+    assert.equal((await fetch(`${hub.base}/api/ops/api/incidents`)).status, 503);
+    assert.equal((await fetch(`${hub.base}/api/ops/api/stream`)).status, 503);
+  } finally {
+    await hub.stop();
+    ops.closeAllConnections();
     await t.cleanup();
   }
 });

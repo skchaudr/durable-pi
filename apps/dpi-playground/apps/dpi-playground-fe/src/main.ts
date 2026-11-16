@@ -5,4 +5,5 @@ import "./network.css";
 import "./jobs.css";
 import "./extensions.css";
 import "./prime.css";
+import "./incidents.css";
 createApp(App).mount("#app");

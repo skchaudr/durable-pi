@@ -6,7 +6,7 @@ import type { ErrorCode, NetworkDevice } from "@sdk/api";
 
 export const deviceClient = (id: string) => new DpiClient(`/api/devices/${encodeURIComponent(id)}`);
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
   const r = await fetch(`/api${path}`, {
     method,
     headers: body === undefined ? {} : { "content-type": "application/json" },
