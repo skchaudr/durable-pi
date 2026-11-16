@@ -21,7 +21,7 @@ export const config = {
   host: option("--host", "127.0.0.1"),
   dev: args.includes("--dev"),
   /** A CLIProxyAPI model id from model-catalog.ts. */
-  model: option("--model", "claude-sonnet-5-5"),
+  model: option("--model", "claude-sonnet-5-5-high"),
   /** CLIProxyAPI's OpenAI-compatible endpoint, as in the dpi backend's ~/.dpi/models.json. */
   cliproxyUrl: process.env.CLIPROXY_BASE_URL ?? "http://127.0.0.1:8317/v1",
   thinking: option("--thinking", "high") as "off" | "minimal" | "low" | "medium" | "high" | "xhigh",
