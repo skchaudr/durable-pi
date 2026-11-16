@@ -198,7 +198,7 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
       JSON.stringify((await store.entries(c, undefined, 500)).items.filter((e) => e.kind === "pi.system").slice(0, 1));
 
     let ext = await store.extensionsOf(row, c);
-    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false], ["codemode", false]]);
+    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", false], ["jev-damage-control", false], ["codemode", false], ["incident-ops", false]]);
     assert.deepEqual(ext.builtIn.sort(), ["coding-tools", "playground"]);
     assert.deepEqual(ext.extensions[0].prompts?.map((p) => [p.id, p.enabled]), [["smart_ass_opus_fix.md", true], ["one_sentence.md", false]]);
 
@@ -225,13 +225,13 @@ test("custom extensions: jev-damage-control blocks rm -rf only while on; system-
     assert.doesNotMatch(await systemText(), /Clear, Concise, Actionable Communication/);
     // Extensions stack: turning one on keeps the other on.
     ext = await store.setExtension(row, c, { name: "jev-damage-control", enabled: true });
-    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true], ["codemode", false]]);
+    assert.deepEqual(ext.extensions.map((e) => [e.name, e.enabled]), [["system-prompts", true], ["jev-damage-control", true], ["codemode", false], ["incident-ops", false]]);
     assert.deepEqual(ext.builtIn, ["coding-tools", "playground"]);
     await mkdir(join(t.work, "doomed"));
     await turn("!rm -rf doomed");
     assert.ok(existsSync(join(t.work, "doomed")));
     ext = await store.setExtension(row, c, { name: "system-prompts", enabled: false });
-    assert.deepEqual(ext.extensions.map((e) => e.enabled), [false, true, false]);
+    assert.deepEqual(ext.extensions.map((e) => e.enabled), [false, true, false, false]);
     await assert.rejects(() => store.setExtension(row, c, { name: "nope", enabled: true }), /Unknown extension/);
   } finally {
     await store.close();
@@ -409,5 +409,33 @@ test("codemode subagents: a script runs 12 subagents with at most 8 at once; a s
   } finally {
     await store.close();
     await t.cleanup();
+  }
+});
+
+test("incident-ops: each tool proxies to the ops service with the bearer token and the incident id", async () => {
+  const { createServer } = await import("node:http");
+  const { createIncidentOps } = await import("../src/incident-ops.js");
+  const seen: { url?: string; auth?: string; body: unknown }[] = [];
+  const server = createServer(async (req, res) => {
+    let text = "";
+    for await (const chunk of req) text += chunk;
+    seen.push({ url: req.url, auth: req.headers.authorization, body: JSON.parse(text) });
+    res.setHeader("content-type", "application/json");
+    if (req.url?.endsWith("/deploy")) res.end(JSON.stringify({ status: "awaiting_approval", deployId: 4 }));
+    else res.writeHead(400).end(JSON.stringify({ error: "This agent does not own that incident." }));
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  try {
+    const tool = (ops: { url: string; token: string } | undefined, name: string) => createIncidentOps(ops).tools!.find((t) => t.name === name)!;
+    const run = (ops: { url: string; token: string } | undefined, name: string, args: object) =>
+      (tool(ops, name) as any).execute(args, {}, {});
+    const out = await run({ url, token: "secret" }, "deploy", { incident_id: "INC-0001", summary: "s" });
+    assert.deepEqual(seen[0], { url: "/api/tools/deploy", auth: "Bearer secret", body: { incidentId: "INC-0001", args: { summary: "s" } } });
+    assert.deepEqual(JSON.parse(out.output[0].text), { status: "awaiting_approval", deployId: 4 });
+    await assert.rejects(run({ url, token: "secret" }, "list_incidents", { incident_id: "INC-9" }), /does not own/);
+    await assert.rejects(run({ url, token: "" }, "deploy", { incident_id: "INC-0001", summary: "s" }), /not configured/);
+  } finally {
+    server.close();
   }
 });

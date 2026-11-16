@@ -7,6 +7,7 @@
 //   codemode             the model writes JavaScript that calls this agent's tools in a QuickJS sandbox; while it is
 //                        on, the model is offered only codemode, bash and handoff (store.setExtension sets modelTools)
 //                        and every script gets the continue-and-mark prelude (script-prelude.ts)
+//   incident-ops         the proactive demo's incident tools, as proxies to the ops service (incident-ops.ts)
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
@@ -16,6 +17,7 @@ import type { HarnessExtensionInfo } from "../../dpi-sdk/src/api.js";
 import { askJev, type JevAnswer, type JevQuestion } from "./jev.js";
 import { interruptedCalls, interruptedTrailer, wrapScript } from "./script-prelude.js";
 import { MAX_SCRIPT_SUBAGENTS } from "./extensions.js";
+import { createIncidentOps, type OpsEndpoint } from "./incident-ops.js";
 
 const PROMPTS_DIR = join(import.meta.dirname, "../prompts");
 
@@ -144,9 +146,15 @@ export const ADDON_INFO: Omit<HarnessExtensionInfo, "enabled" | "prompts">[] = [
     description:
       "Adds a codemode tool: the model writes JavaScript that calls this agent's tools as await tools.<name>(args) in a QuickJS sandbox. Only the script's output enters the context. A script survives a restart and resumes without re-running finished calls; a call the restart interrupted resolves as { interrupted: true } and the script goes on. While on, the model is offered only codemode, bash and handoff; scripts reach the rest, with at most 8 subagents at once.",
   },
+  {
+    name: "incident-ops",
+    title: "Incident ops",
+    description:
+      "The proactive demo's incident tools: query_logs, log_summary, list_incidents, update_incident, submit_fix and deploy. Each calls the ops service (OPS_URL, OPS_TOOL_TOKEN), which holds the incidents and the deploys. deploy returns at once; the engineer's decision arrives as a message.",
+  },
 ];
 
-export function createAddons(opts: { offline: boolean }) {
+export function createAddons(opts: { offline: boolean; ops?: OpsEndpoint }) {
   const prompts = defineExtension({
     name: "system-prompts",
     sections: [
@@ -219,8 +227,9 @@ export function createAddons(opts: { offline: boolean }) {
         { tag: false },
       )],
   };
-  const all: Record<string, Extension> = { "system-prompts": prompts, "jev-damage-control": jev, codemode };
-  return { all, list: [prompts, jev, codemode] };
+  const incidentOps = createIncidentOps(opts.ops);
+  const all: Record<string, Extension> = { "system-prompts": prompts, "jev-damage-control": jev, codemode, "incident-ops": incidentOps };
+  return { all, list: [prompts, jev, codemode, incidentOps] };
 }
 
 export type Addons = ReturnType<typeof createAddons>;

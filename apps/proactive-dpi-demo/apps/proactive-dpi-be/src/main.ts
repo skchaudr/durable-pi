@@ -9,6 +9,7 @@ import { demoState } from "../../../shared/log-store.ts";
 import { Jev } from "./jev.ts";
 import { Ops } from "./ops.ts";
 import { branchReview } from "./repo.ts";
+import { mountReadApi, mountToolApi } from "./tool-api.ts";
 import { Voice } from "./voice.ts";
 import { WatchStore } from "./watch-store.ts";
 import { Watcher } from "./watcher.ts";
@@ -80,6 +81,8 @@ app.get("/api/config", (_req, res) => {
     models,
     defaultModel: models.find((m) => m.id === config.model),
     rootConversationId: ops.root.id,
+    agentBackend: config.agentBackend,
+    hubUrl: config.hubUrl,
     jev: jev.provider,
     tts: config.tts,
     thresholds: {
@@ -96,14 +99,16 @@ app.get("/api/config", (_req, res) => {
 app.get("/api/stream", async (req, res) => {
   const send = sse(res);
   const status = () => ({ stats: store.stats(), demo: demoState(store.control()) });
-  send("init", { rows: store.recent(400), incidents: await ops.incidents(), ...status() });
+  send("init", { rows: store.recent(400), incidents: await ops.incidents(), deploys: await ops.deploys(), ...status() });
   const onLog = (row: unknown) => send("log", row);
   const onVerdict = (verdict: unknown) => send("verdict", verdict);
   const onIncident = (incident: unknown) => send("incident", incident);
+  const onDeploy = (deploy: unknown) => send("deploy", deploy);
   const onSpeech = (speech: unknown) => send("speech", speech);
   watcher.on("log", onLog);
   watcher.on("verdict", onVerdict);
   ops.on("incident", onIncident);
+  ops.on("deploy", onDeploy);
   voice.on("speech", onSpeech);
   const timer = setInterval(() => send("status", status()), 2000);
   req.on("close", () => {
@@ -111,6 +116,7 @@ app.get("/api/stream", async (req, res) => {
     watcher.off("log", onLog);
     watcher.off("verdict", onVerdict);
     ops.off("incident", onIncident);
+    ops.off("deploy", onDeploy);
     voice.off("speech", onSpeech);
   });
 });
@@ -180,6 +186,8 @@ app.post("/api/demo/deploy-bug", (_req, res) => {
   res.json({ ok: true });
 });
 
+mountReadApi(app, ops);
+mountToolApi(app, ops, config.opsToolToken);
 app.use("/api/tts", express.static(ttsDir));
 app.use("/api", (_req, res) => res.status(404).json({ error: "API route not found" }));
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -203,7 +211,7 @@ if (config.dev) {
 }
 server.listen(config.port, config.host, () => {
   console.log(
-    `Proactive DPI: http://localhost:${config.port}\n  jev ${jev.provider}  model ${config.model}  tts ${config.tts}  incident after ${config.incidentThreshold} incident or ${config.suspiciousThreshold} suspicious verdicts in ${config.windowMs / 1000}s`,
+    `Proactive DPI: http://localhost:${config.port}\n  jev ${jev.provider}  agent ${config.agentBackend}  model ${config.model}  tts ${config.tts}  incident after ${config.incidentThreshold} incident or ${config.suspiciousThreshold} suspicious verdicts in ${config.windowMs / 1000}s`,
   );
   if (config.host !== "0.0.0.0") return;
   for (const addresses of Object.values(networkInterfaces()))

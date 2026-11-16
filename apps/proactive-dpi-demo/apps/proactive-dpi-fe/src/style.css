@@ -273,6 +273,12 @@ svg {
 .error-banner span {
   flex: 1;
 }
+.remote-agent {
+  display: block;
+  padding: 8px 25px;
+  font-size: 13px;
+  opacity: 0.8;
+}
 
 /* Two columns: agent chat left, event stream right */
 .workspace {

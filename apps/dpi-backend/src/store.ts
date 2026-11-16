@@ -70,6 +70,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { createPlayground, Workspace, type SpawnSession } from "./extensions.js";
 import { observeSession } from "./observe.js";
 import { createJobs, JobRuns, JOB_DEFS, jobDef, resolveJobInput, type Jobs } from "./jobs.js";
+import type { OpsEndpoint } from "./incident-ops.js";
 import { ADDON_INFO, CODEMODE_MODEL_TOOLS, createAddons, PROMPTS, PromptChecklist, type Addons } from "./addons.js";
 import { JOB_RUNS_DOC } from "../../dpi-sdk/src/jobs.js";
 
@@ -85,6 +86,9 @@ export const WRITE_TOOLS = new Set([
   "ping_on_call_engineer",
   "subagent",
   "start_session",
+  "update_incident",
+  "submit_fix",
+  "deploy",
 ]);
 
 export type SessionRow = {
@@ -102,6 +106,8 @@ export interface StoreOptions {
   startDirs: string[];
   name: string;
   provider: "openrouter" | "faux";
+  /** The ops service the incident-ops add-on calls. */
+  ops?: OpsEndpoint;
 }
 
 /** Agent documents a client may read or stream, by kind. */
@@ -598,7 +604,7 @@ export class Store {
       const playground = createPlayground(this.shared, row.id, this.spawnSession, jobs, (m) => this.validateModel(m));
       registry.install(playground);
       // Custom extensions are installed but not selected: an agent turns them on in its own selection.
-      const addons = createAddons({ offline: this.options.provider === "faux" });
+      const addons = createAddons({ offline: this.options.provider === "faux", ops: this.options.ops });
       for (const extension of addons.list) registry.install(extension);
       const harness = await Harness.open(
         await openNodeSqliteStorage(row.dbPath),

@@ -13,6 +13,8 @@ export type Config = {
   models: Model[];
   defaultModel?: Model;
   rootConversationId: number;
+  agentBackend: "inproc" | "dpi" | "prime";
+  hubUrl: string;
   jev: string;
   tts: "host" | "browser" | "both" | "off";
   thresholds: { incident: number; suspicious: number; windowSeconds: number };

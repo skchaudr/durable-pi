@@ -1,4 +1,8 @@
-import { existsSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { parseEnv } from "node:util";
 import { projectEnvPath } from "../../../shared/paths.ts";
 
 // CLIPROXY_API_KEY (agent), TYPESAFE_API_KEY or OPENROUTER_API_KEY (Jev) and ELEVENLABS_API_KEY live in the project root .env.
@@ -15,11 +19,42 @@ const option = (key: string, fallback: string) => {
 const tts = option("--tts", process.platform === "darwin" ? "host" : "browser");
 if (!["host", "browser", "both", "off"].includes(tts)) throw Error("--tts is host, browser, both, or off");
 
+const agentBackend = option("--agent-backend", "inproc");
+if (!["inproc", "dpi", "prime"].includes(agentBackend)) throw Error("--agent-backend is inproc, dpi, or prime");
+/** The dpi API of a remote agent backend. Its token never leaves this process: read from the backend's own env file. */
+const remote = (url: string, envFile: string) => ({
+  url,
+  token: () => parseEnv(readFileSync(join(homedir(), envFile), "utf8")).DPI_TOKEN ?? "",
+});
+const remotes = {
+  dpi: remote(process.env.DPI_BACKEND_URL ?? "http://127.0.0.1:4780", ".dpi/backend.env"),
+  prime: remote(process.env.PRIME_BACKEND_URL ?? "http://127.0.0.1:4782", ".prime-backend/backend.env"),
+};
+
+/**
+ * Remote agents call the tool API with OPS_TOOL_TOKEN, which the dpi backend's environment and Prime's settings.json
+ * hold too. A random token per run would 401 every call, so remote backends refuse to start without one.
+ */
+export function opsToolToken(env: string | undefined, backend: string) {
+  if (env) return env;
+  if (backend !== "inproc")
+    throw Error(`--agent-backend ${backend} needs OPS_TOOL_TOKEN (project .env): the ${backend} agent's tool calls would get 401 otherwise`);
+  console.warn("[config] OPS_TOOL_TOKEN is not set: --agent-backend dpi or prime would get 401 on every tool call (inproc is unaffected)");
+  return randomBytes(24).toString("hex");
+}
+
 export const config = {
   port: Number(option("--port", "4790")),
   /** Loopback by default: the UI has no login and the incident agent runs bash. Pass --host 0.0.0.0 for a LAN. */
   host: option("--host", "127.0.0.1"),
   dev: args.includes("--dev"),
+  /** inproc runs the incident agent in this process; dpi and prime run it on that backend through the dpi API. */
+  agentBackend: agentBackend as "inproc" | "dpi" | "prime",
+  /** The remote agent backend, when there is one. */
+  remote: agentBackend === "inproc" ? undefined : remotes[agentBackend as "dpi" | "prime"],
+  opsToolToken: opsToolToken(process.env.OPS_TOOL_TOKEN, agentBackend),
+  /** Remote agents only: where the hub shows their sessions. */
+  hubUrl: process.env.DPI_HUB_URL ?? "http://127.0.0.1:4781",
   /** A CLIProxyAPI model id from model-catalog.ts. */
   model: option("--model", "claude-sonnet-5-5-high"),
   /** CLIProxyAPI's OpenAI-compatible endpoint, as in the dpi backend's ~/.dpi/models.json. */

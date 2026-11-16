@@ -78,6 +78,8 @@ export type Incident = {
   status: IncidentStatus;
   summary: string;
   conversationId: number;
+  /** Set when the incident agent runs on a dpi or Prime backend instead of in the ops service. */
+  remote?: { backend: "dpi" | "prime"; sessionId: string; agentId: string };
   branch: string;
   worktree: string;
   openedAt: number;
@@ -120,6 +122,8 @@ export type Deploy = {
   decidedAt: number | null;
   note: string | null;
   verification: { checkouts: number; guests: number; errors: number } | null;
+  /** Where the requesting agent runs, copied from its incident when listed or streamed, so a client can link to it. */
+  remote?: Incident["remote"];
 };
 
 export type DemoState = {

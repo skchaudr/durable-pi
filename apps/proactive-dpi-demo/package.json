@@ -11,6 +11,7 @@
     "be": "tsx apps/proactive-dpi-be/src/main.ts",
     "dev": "tsx scripts/demo.ts --dev",
     "start": "tsx scripts/demo.ts",
+    "test": "tsx --test apps/proactive-dpi-be/tests/*.test.ts",
     "build": "vue-tsc --noEmit -p apps/proactive-dpi-fe/tsconfig.json && tsc --noEmit -p apps/proactive-dpi-be/tsconfig.json && tsc --noEmit -p apps/proactive-dpi-logs/tsconfig.json && vite build --config apps/proactive-dpi-fe/vite.config.ts"
   },
   "dependencies": {

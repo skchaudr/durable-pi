@@ -15,6 +15,8 @@ export interface BackendConfig {
   startDirs: string[];
   provider: "openrouter" | "faux";
   token: string;
+  /** The proactive demo's ops service, for the incident-ops add-on. Without OPS_TOOL_TOKEN its tools report that they are not configured. */
+  ops: { url: string; token: string };
 }
 
 const expand = (p: string) => (p === "~" ? homedir() : p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
@@ -43,6 +45,7 @@ export function loadConfig(argv = process.argv.slice(2), env = process.env): Bac
       .map((p) => resolve(expand(p))),
     provider: (env.DPI_PROVIDER ?? "openrouter") === "faux" ? "faux" : "openrouter",
     token: env.DPI_TOKEN ?? "",
+    ops: { url: env.OPS_URL ?? "http://127.0.0.1:4790", token: env.OPS_TOOL_TOKEN ?? "" },
   };
   if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)
     throw Error(`Invalid port: ${config.port}`);

@@ -55,6 +55,7 @@ The timeline depends on Jev. Up to 6 Jev calls run at once, and 429, 502, 503 an
 | `--suspicious-threshold <n>` | `8` | Suspicious verdicts with one fingerprint that open an incident |
 | `--window <s>` | `120` | Window for both thresholds |
 | `--model <id>` | `claude-sonnet-5-5` | Agent model, a CLIProxyAPI id from `model-catalog.ts` (endpoint `CLIPROXY_BASE_URL`, default `http://127.0.0.1:8317/v1`; key `CLIPROXY_API_KEY`). Switchable per conversation in the UI |
+| `--agent-backend inproc\|dpi\|prime` | `inproc` | Where the incident agent runs. `inproc` is pi-durable in this process. `dpi` (:4780) and `prime` (:4782) run it through the dpi HTTP API with the tools served by this service (`POST /api/tools/:name`, `/mcp`; bearer `OPS_TOOL_TOKEN`). `dpi` needs the `incident-ops` add-on (it reads `OPS_URL`, `OPS_TOOL_TOKEN`); `prime` needs `mcpServers.incident-ops` in its `settings.json`. Remote deploys return at once and the decision reaches the agent as a message. The agent runs on `--model` when the backend lists it, else on the backend's default model; the incident timeline says which, and a start failure blocks the incident with the reason. `--agent-backend dpi` or `prime` refuses to start without `OPS_TOOL_TOKEN` |
 | `--thinking <level>` | `high` | Agent thinking level |
 | `--verbose` | off | Show process output in the terminal |
 | `--log-rows` | off | Print every log row (with `--verbose`) |

@@ -223,6 +223,9 @@ onBeforeUnmount(() => events?.close());
       </div>
     </header>
     <IncidentCard v-if="incident" :key="incident.id" :incident="incident" />
+    <a v-if="incident?.remote" class="remote-agent" :href="config.hubUrl" target="_blank" rel="noreferrer"
+      >This agent runs on {{ incident.remote.backend }}, session {{ incident.remote.sessionId.slice(0, 8) }}. Open it in the hub</a
+    >
     <div v-if="error" class="error-banner" role="alert">
       <Info :size="18" /><span>{{ error }}</span
       ><button class="icon-button" aria-label="Dismiss error" @click="error = ''">×</button>

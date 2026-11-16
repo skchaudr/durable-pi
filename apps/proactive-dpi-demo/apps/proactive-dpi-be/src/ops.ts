@@ -22,6 +22,7 @@ import { agentDbPath, repoDir, worktreesDir } from "../../../shared/paths.ts";
 import { lockFile } from "../../../shared/lock.ts";
 import type { Deploy, Incident } from "../../../shared/types.ts";
 import { config } from "./config.ts";
+import { inprocRunner, recordNote, remoteRunner, type AgentRunner, type Remote } from "./agents.ts";
 import { Codemode, Deploys, Incidents, closeCodemodeSandbox, createExtensions, logLine } from "./extensions.ts";
 import { curatedModels } from "./model-catalog.ts";
 import { ensureWorktree } from "./repo.ts";
@@ -53,6 +54,10 @@ const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 export class Ops extends EventEmitter {
   private openFingerprints = new Set<string>();
+  private readonly runner: AgentRunner;
+  private sentDeploys = new Map<number, string>();
+  private publishing = false;
+  private republish = false;
 
   private constructor(
     readonly harness: Harness,
@@ -64,6 +69,9 @@ export class Ops extends EventEmitter {
     private readonly unlock: () => void,
   ) {
     super();
+    this.runner = config.remote
+      ? remoteRunner(config.agentBackend as Remote["backend"], config.remote)
+      : inprocRunner((id) => this.conversation(id));
   }
 
   static async open(store: WatchStore, voice: Voice) {
@@ -124,6 +132,7 @@ export class Ops extends EventEmitter {
         },
       });
       ops = new Ops(harness, root, models, extensions, store, voice, unlock);
+      harness.subscribeCommits(() => setTimeout(() => void ops?.publishDeploys(), 20));
       harness.resume();
       await ops.recover();
       return ops;
@@ -138,12 +147,37 @@ export class Ops extends EventEmitter {
     return Object.values(doc?.items ?? {}).sort((a, b) => b.openedAt - a.openedAt) as Incident[];
   }
 
+  /** Every deploy request, each with where its incident's agent runs. */
+  async deploys(): Promise<Deploy[]> {
+    const [doc, incidents] = await Promise.all([this.harness.snapshot(Deploys, ctx), this.incidents()]);
+    const remote = new Map(incidents.map((i) => [i.id, i.remote]));
+    return Object.values(doc?.items ?? {}).map((d) => ({ ...d, remote: remote.get(d.incidentId) }) as Deploy);
+  }
+
+  /** Emits a `deploy` event for each deploy that changed since the last commit looked at. Runs one at a time. */
+  private async publishDeploys() {
+    if (this.publishing) return void (this.republish = true);
+    this.publishing = true;
+    do {
+      this.republish = false;
+      try {
+        for (const d of await this.deploys()) {
+          const json = JSON.stringify(d);
+          if (this.sentDeploys.get(d.id) === json) continue;
+          this.sentDeploys.set(d.id, json);
+          this.emit("deploy", d);
+        }
+      } catch {} // the harness is closing
+    } while (this.republish);
+    this.publishing = false;
+  }
+
   /** After a restart: every incident has its worktree and its brief, exactly once. */
   private async recover() {
     for (const incident of await this.incidents()) {
       this.openFingerprints.add(incident.fingerprint);
       ensureWorktree(incident.branch, incident.worktree);
-      await this.kickoff(incident);
+      void this.kickoff(incident);
     }
   }
 
@@ -200,7 +234,7 @@ export class Ops extends EventEmitter {
     ensureWorktree(incident.branch, incident.worktree);
     if (config.announceOpen)
       this.voice.say(config.openedSpeech.replace("{service}", incident.service.replace(/-api$/, "")));
-    await this.kickoff(incident);
+    void this.kickoff(incident);
     this.emit("incident", incident);
   }
 
@@ -210,14 +244,29 @@ export class Ops extends EventEmitter {
     return started ? `T+${((Date.now() - started) / 1000).toFixed(1)}s` : "";
   }
 
-  /** The request ID makes the brief exactly-once: a retry after a crash finds the same submission. */
+  /**
+   * Starts the incident's agent on its brief; the runner makes that exactly-once, so a retry after a crash is safe.
+   * Never rejects: a failure is logged and recorded on the incident, which is blocked.
+   */
   private async kickoff(incident: Incident) {
-    const conversation = await this.harness.conversation(incident.conversationId as ConversationId, ctx);
-    if (!conversation) throw Error(`${incident.id} lost its conversation`);
-    await conversation.submit(
-      { type: "input", content: this.brief(incident), requestId: `incident:${incident.id}:brief` },
-      ctx,
-    );
+    incident = { ...incident }; // the runner records where a remote agent lives; a document snapshot is read only
+    const note = async (text: string, failed = false) => {
+      console.log(`[ops] ${this.elapsed()} ${incident.id} ${failed ? "agent failed to start" : "agent"}: ${text}`);
+      this.emit("incident", await recordNote(this.harness, incident.id, failed ? `Agent failed to start: ${text}` : text, failed));
+    };
+    try {
+      await this.runner.start(incident, this.brief(incident), {
+        note,
+        save: async (remote) => {
+          await this.harness.commit(async (tx) => {
+            (await tx.doc(Incidents)).items[incident.id].remote = remote;
+          }, ctx);
+          incident.remote = remote;
+        },
+      });
+    } catch (e) {
+      await note((e as Error).message, true).catch((err) => console.error(`[ops] could not record the failure of ${incident.id}: ${err}`));
+    }
   }
 
   private brief(incident: Incident) {
@@ -234,7 +283,18 @@ ${stack ? `\nStack trace:\n${stack}\n` : ""}
 Your worktree ${incident.worktree} is checkout-api on branch ${incident.branch}, created from main. Work the incident through every stage of your playbook.`;
   }
 
+  /** Tells a remote agent something, exactly once per request ID. A failure is logged: the decision itself is committed. */
+  private async tell(incident: Incident | undefined, requestId: string, text: string) {
+    if (!incident?.remote) return;
+    try {
+      await this.runner.tell?.(incident, requestId, text);
+    } catch (e) {
+      console.error(`[ops] could not tell ${incident.id} (${requestId}): ${(e as Error).message}`);
+    }
+  }
+
   private incidentChanged(incident: Incident, announce: boolean) {
+    if (incident.status === "deployed") void this.tell(incident, `deploy:${incident.id}:live`, incident.summary);
     if (announce) {
       console.log(`[ops] ${this.elapsed()} ${incident.id} awaiting deploy approval: ${incident.report.commit}`);
       this.voice.say(config.readySpeech);
@@ -327,17 +387,34 @@ Your worktree ${incident.worktree} is checkout-api on branch ${incident.branch},
     }
   }
 
-  /** The engineer's decision. The deploy's durable task picks it up from the committed document. */
+  /** The engineer's decision. The deploy's durable task picks it up from the committed document; a remote agent hears of it by message. */
   async decideDeploy(id: number, approved: boolean, note: string | null) {
-    await this.harness.commit(async (tx) => {
+    const { incidentId, commit } = await this.harness.commit(async (tx) => {
       const request = (await tx.doc(Deploys)).items[String(id)];
       if (!request) throw Error("Deploy not found");
       if (request.status !== "awaiting_approval") throw Error(`This deploy is already ${request.status}`);
       request.status = approved ? "deploying" : "declined";
       request.decidedAt = Date.now();
       request.note = note;
+      return { incidentId: request.incidentId, commit: request.commit };
     }, ctx);
     console.log(`[ops] ${this.elapsed()} deploy ${id} ${approved ? "approved" : "declined"}`);
+    const why = note ? `: ${note}` : "";
+    await this.tell(
+      (await this.incidents()).find((i) => i.id === incidentId),
+      `deploy:${id}:decision`,
+      approved
+        ? `Deploy ${id} of ${commit} was approved by the on-call engineer${why}. It is rolling out and being verified on live traffic. You will get another message when it is live.`
+        : `Deploy ${id} was declined by the on-call engineer${why}. Nothing shipped. Acknowledge in one sentence. Call deploy again only if they ask.`,
+    );
+  }
+
+  /** The remote tool API (tool-api.ts): a remote agent's tool call against its incident. */
+  callTool(name: string, incidentId: string, args: unknown) {
+    return this.extensions.callTool(this.harness, ctx, name, incidentId, args);
+  }
+  toolInfo() {
+    return this.extensions.toolInfo();
   }
 
   async close() {
