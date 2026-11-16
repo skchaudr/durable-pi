@@ -885,7 +885,7 @@ svg {
   display: flex;
   width: 100%;
   justify-content: flex-start;
-  padding: 10px 9px;
+  padding: 10px 6px;
   border-radius: 5px;
   color: #f2eeee;
   font-size: 16px;
@@ -2548,12 +2548,29 @@ button:disabled {
   border-top: 0;
   padding: 0 8px;
 }
+/* Many tabs (Prime has 7) scroll instead of colliding; the collapse button stays put. */
+.inspector-tab-scroll {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.inspector-tab-scroll::-webkit-scrollbar {
+  display: none;
+}
 .inspector > .inspector-tabs button {
   position: relative;
+  flex: 1 0 auto;
   flex-direction: column;
   gap: 5px;
-  padding: 10px 4px;
+  padding: 10px 6px;
   line-height: 1.4;
+  white-space: nowrap;
+}
+.inspector > .inspector-tabs .panel-toggle {
+  flex: none;
+  padding: 0;
 }
 .inspector-tabs .count {
   position: absolute;

@@ -71,6 +71,12 @@ const allTabs = computed(() => [
 // A Prime child serves neither App State, tools nor extensions; moving off a tab's device lands on Session.
 const tabs = computed(() => (primeChild.value ? allTabs.value.filter((t) => t.id === "session" || t.id === "tasks") : allTabs.value));
 watch(tabs, (t) => t.some((x) => x.id === ui.tab) || (ui.tab = "session"));
+// A scrolling tab bar keeps the active tab in view.
+watch(
+  () => [ui.tab, tabs.value.length, inspectorExpanded.value],
+  () => document.getElementById(`inspector-tab-${ui.tab}`)?.scrollIntoView({ block: "nearest", inline: "nearest" }),
+  { flush: "post", immediate: true },
+);
 const usageRows = computed(() => [
   { label: "Input", tokens: usage.value.input, cost: usage.value.inputCost },
   { label: "Output", tokens: usage.value.output, cost: usage.value.outputCost },
@@ -192,20 +198,22 @@ const offeredTools = computed(() => detail.value?.tools.filter((t) => t.offered)
       </button>
     </div>
     <template v-else>
-      <div class="inspector-tabs" role="tablist" aria-label="Session details">
-        <button
-          v-for="t in tabs"
-          :id="`inspector-tab-${t.id}`"
-          :key="t.id"
-          role="tab"
-          aria-controls="inspector-panel"
-          :aria-selected="ui.tab === t.id"
-          :class="{ active: ui.tab === t.id }"
-          @click="ui.tab = t.id"
-        >
-          <component :is="t.icon" :size="18" />{{ t.label
-          }}<span v-if="t.id === 'tasks' && tasks.length" class="count">{{ tasks.length }}</span>
-        </button>
+      <div class="inspector-tabs">
+        <div class="inspector-tab-scroll" role="tablist" aria-label="Session details">
+          <button
+            v-for="t in tabs"
+            :id="`inspector-tab-${t.id}`"
+            :key="t.id"
+            role="tab"
+            aria-controls="inspector-panel"
+            :aria-selected="ui.tab === t.id"
+            :class="{ active: ui.tab === t.id }"
+            @click="ui.tab = t.id"
+          >
+            <component :is="t.icon" :size="18" />{{ t.label
+            }}<span v-if="t.id === 'tasks' && tasks.length" class="count">{{ tasks.length }}</span>
+          </button>
+        </div>
         <button
           class="icon-button panel-toggle"
           aria-label="Collapse inspector"
