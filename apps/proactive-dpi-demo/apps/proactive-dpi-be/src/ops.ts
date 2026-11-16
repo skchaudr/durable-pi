@@ -22,7 +22,7 @@ import { agentDbPath, repoDir, worktreesDir } from "../../../shared/paths.ts";
 import { lockFile } from "../../../shared/lock.ts";
 import type { Deploy, Incident } from "../../../shared/types.ts";
 import { config } from "./config.ts";
-import { inprocRunner, recordNote, remoteRunner, type AgentRunner, type Remote } from "./agents.ts";
+import { Notifier, inprocRunner, recordNote, remoteRunner, type AgentRunner, type Remote } from "./agents.ts";
 import { Codemode, Deploys, Incidents, closeCodemodeSandbox, createExtensions, logLine } from "./extensions.ts";
 import { curatedModels } from "./model-catalog.ts";
 import { ensureWorktree } from "./repo.ts";
@@ -55,6 +55,8 @@ const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh"];
 export class Ops extends EventEmitter {
   private openFingerprints = new Set<string>();
   private readonly runner: AgentRunner;
+  private readonly notifier: Notifier;
+  private notifyTimer?: ReturnType<typeof setInterval>;
   private sentDeploys = new Map<number, string>();
   private publishing = false;
   private republish = false;
@@ -72,6 +74,14 @@ export class Ops extends EventEmitter {
     this.runner = config.remote
       ? remoteRunner(config.agentBackend as Remote["backend"], config.remote)
       : inprocRunner((id) => this.conversation(id));
+    this.notifier = new Notifier(
+      this.runner,
+      async () => ({ incidents: await this.incidents(), deploys: await this.deploys() }),
+      async (incident, requestId, error) => {
+        const text = `Could not tell the agent (${requestId}): ${error.message}. Still retrying.`;
+        this.emit("incident", await recordNote(this.harness, incident.id, text));
+      },
+    );
   }
 
   static async open(store: WatchStore, voice: Voice) {
@@ -133,6 +143,8 @@ export class Ops extends EventEmitter {
       });
       ops = new Ops(harness, root, models, extensions, store, voice, unlock);
       harness.subscribeCommits(() => setTimeout(() => void ops?.publishDeploys(), 20));
+      // What a remote agent is owed is derived from committed state, so a crash or a down backend only delays it.
+      if (config.remote) ops.notifyTimer = setInterval(() => void ops?.notifier.reconcile(), 2000).unref();
       harness.resume();
       await ops.recover();
       return ops;
@@ -179,6 +191,7 @@ export class Ops extends EventEmitter {
       ensureWorktree(incident.branch, incident.worktree);
       void this.kickoff(incident);
     }
+    void this.notifier.reconcile();
   }
 
   async openIncident(trigger: Trigger) {
@@ -283,18 +296,8 @@ ${stack ? `\nStack trace:\n${stack}\n` : ""}
 Your worktree ${incident.worktree} is checkout-api on branch ${incident.branch}, created from main. Work the incident through every stage of your playbook.`;
   }
 
-  /** Tells a remote agent something, exactly once per request ID. A failure is logged: the decision itself is committed. */
-  private async tell(incident: Incident | undefined, requestId: string, text: string) {
-    if (!incident?.remote) return;
-    try {
-      await this.runner.tell?.(incident, requestId, text);
-    } catch (e) {
-      console.error(`[ops] could not tell ${incident.id} (${requestId}): ${(e as Error).message}`);
-    }
-  }
-
   private incidentChanged(incident: Incident, announce: boolean) {
-    if (incident.status === "deployed") void this.tell(incident, `deploy:${incident.id}:live`, incident.summary);
+    if (incident.status === "deployed") void this.notifier.reconcile();
     if (announce) {
       console.log(`[ops] ${this.elapsed()} ${incident.id} awaiting deploy approval: ${incident.report.commit}`);
       this.voice.say(config.readySpeech);
@@ -387,26 +390,18 @@ Your worktree ${incident.worktree} is checkout-api on branch ${incident.branch},
     }
   }
 
-  /** The engineer's decision. The deploy's durable task picks it up from the committed document; a remote agent hears of it by message. */
+  /** The engineer's decision. The deploy's durable task picks it up from the committed document; a remote agent hears of it by message (Notifier). */
   async decideDeploy(id: number, approved: boolean, note: string | null) {
-    const { incidentId, commit } = await this.harness.commit(async (tx) => {
+    await this.harness.commit(async (tx) => {
       const request = (await tx.doc(Deploys)).items[String(id)];
       if (!request) throw Error("Deploy not found");
       if (request.status !== "awaiting_approval") throw Error(`This deploy is already ${request.status}`);
       request.status = approved ? "deploying" : "declined";
       request.decidedAt = Date.now();
       request.note = note;
-      return { incidentId: request.incidentId, commit: request.commit };
     }, ctx);
     console.log(`[ops] ${this.elapsed()} deploy ${id} ${approved ? "approved" : "declined"}`);
-    const why = note ? `: ${note}` : "";
-    await this.tell(
-      (await this.incidents()).find((i) => i.id === incidentId),
-      `deploy:${id}:decision`,
-      approved
-        ? `Deploy ${id} of ${commit} was approved by the on-call engineer${why}. It is rolling out and being verified on live traffic. You will get another message when it is live.`
-        : `Deploy ${id} was declined by the on-call engineer${why}. Nothing shipped. Acknowledge in one sentence. Call deploy again only if they ask.`,
-    );
+    void this.notifier.reconcile();
   }
 
   /** The remote tool API (tool-api.ts): a remote agent's tool call against its incident. */
@@ -418,6 +413,7 @@ Your worktree ${incident.worktree} is checkout-api on branch ${incident.branch},
   }
 
   async close() {
+    clearInterval(this.notifyTimer);
     try {
       await this.harness.close(ctx);
     } finally {
